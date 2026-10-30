@@ -52,11 +52,19 @@ jobs:
       - name: Grant Execute Permission to Gradlew
         run: chmod +x gradlew
 
+      - name: Prepare Keystore and Environment
+        run: |
+          touch .env
+          if [ ! -f "debug.keystore" ]; then
+            echo "Erzeuge debug.keystore für CI Build..."
+            keytool -genkey -v -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
+        run: ./gradlew assembleDebug --no-configuration-cache --stacktrace
 
       - name: Run Unit & Robolectric Tests
-        run: ./gradlew testDebugUnitTest --continue
+        run: ./gradlew testDebugUnitTest --no-configuration-cache --continue
         continue-on-error: true
 
       - name: Upload Debug APK
