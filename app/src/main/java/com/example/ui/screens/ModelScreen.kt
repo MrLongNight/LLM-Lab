@@ -1,0 +1,339 @@
+package com.example.ui.screens
+
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.engine.ProfilePreset
+import com.example.ui.LLMLabViewModel
+import com.example.ui.ModelLifecycleState
+import com.example.ui.theme.*
+
+@Composable
+fun ModelScreen(viewModel: LLMLabViewModel) {
+    val modelState by viewModel.modelState.collectAsState()
+    val config by viewModel.config.collectAsState()
+
+    val filePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            viewModel.onModelFileSelected(uri)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(DarkBackground)
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // Header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text(
+                    text = "MODELLVERWALTUNG",
+                    color = NeonCyan,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.5.sp
+                )
+                Text(
+                    text = "GGUF Inferenz-Setup",
+                    color = TextPrimary,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            // Profil-Pill
+            Surface(
+                color = DarkSurfaceVariant,
+                shape = RoundedCornerShape(16.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, NeonCyan.copy(alpha = 0.5f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Tune,
+                        contentDescription = "Profil",
+                        tint = NeonCyan,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = config.selectedProfile.label,
+                        color = TextPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
+
+        // Status-Karte
+        StatusDisplayCard(modelState = modelState)
+
+        // Dateiauswahl & Aktionen
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = DarkSurface),
+            border = androidx.compose.foundation.BorderStroke(1.dp, DarkCardBorder)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "GGUF-Datei wählen",
+                    color = TextPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                Text(
+                    text = "Zielmodell: qwen2.5-1.5b-instruct-q4_k_m.gguf (~1,12 GB).\nWähle die Datei von deinem Gerätespeicher oder Downloads-Ordner.",
+                    color = TextSecondary,
+                    fontSize = 13.sp
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { filePicker.launch(arrayOf("*/*")) },
+                        colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("select_model_file_button")
+                    ) {
+                        Icon(imageVector = Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Datei auswählen", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        // Steuerungstasten abhängig vom Zustand
+        when (val state = modelState) {
+            is ModelLifecycleState.ModelSelected -> {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, DarkCardBorder)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "Erkannte Modellparameter",
+                            color = NeonCyan,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Text("Dateiname: ${state.fileName}", color = TextPrimary, fontSize = 13.sp)
+                        Text("Größe: ${"%.2f".format(state.fileSizeBytes / (1024f * 1024f * 1024f))} GB (${state.fileSizeBytes} Bytes)", color = TextSecondary, fontSize = 12.sp)
+
+                        val info = state.ggufInfo
+                        if (info.isValid) {
+                            Text("Signatur: ${info.magic} (Version ${info.version}) - GÜLTIG", color = MatrixGreen, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                            Text("Architektur: ${info.architecture ?: "qwen2"}", color = TextSecondary, fontSize = 12.sp)
+                            Text("Typ: ${info.fileTypeDescription ?: "Q4_K_M"}", color = TextSecondary, fontSize = 12.sp)
+                            Text("Tensoren: ${info.tensorCount} | KV-Einträge: ${info.kvCount}", color = TextSecondary, fontSize = 12.sp)
+                        } else {
+                            Text("Warnung: ${info.errorMessage ?: "Kein gültiger GGUF-Header"}", color = LaserCrimson, fontSize = 12.sp)
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Button(
+                            onClick = { viewModel.initializeModel() },
+                            colors = ButtonDefaults.buttonColors(containerColor = MatrixGreen, contentColor = Color.Black),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("initialize_model_button")
+                        ) {
+                            Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Modell jetzt initialisieren", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            is ModelLifecycleState.Ready -> {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MatrixGreen.copy(alpha = 0.5f))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, tint = MatrixGreen)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Modell einsatzbereit", color = MatrixGreen, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        }
+
+                        Text("Engine: ${state.engineVersion}", color = TextSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        Text("Initialisierungsdauer: ${state.initDurationMs} ms", color = TextPrimary, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+                        Text("Aktive Inferenzparameter: n_ctx=${config.nCtx}, n_batch=${config.nBatch}, n_ubatch=${config.nUbatch}, threads=${config.nThreads}", color = TextSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { viewModel.unloadModel() },
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = LaserCrimson),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("unload_model_button")
+                            ) {
+                                Text("Entladen")
+                            }
+
+                            Button(
+                                onClick = { viewModel.initializeModel() },
+                                colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceVariant, contentColor = NeonCyan),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("reload_model_button")
+                            ) {
+                                Text("Erneut laden")
+                            }
+                        }
+                    }
+                }
+            }
+
+            is ModelLifecycleState.Initializing -> {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, ElectricAmber.copy(alpha = 0.5f))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = ElectricAmber,
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text("Initialisierung läuft...", color = ElectricAmber, fontWeight = FontWeight.Bold)
+                        }
+
+                        LinearProgressIndicator(
+                            progress = { state.progressPercent / 100f },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(8.dp)
+                                .clip(RoundedCornerShape(4.dp)),
+                            color = ElectricAmber,
+                            trackColor = DarkSurfaceVariant
+                        )
+
+                        Text("Phase: ${state.phase}", color = TextPrimary, fontSize = 13.sp)
+                        Text("Fortschritt: ${state.progressPercent.toInt()}% | Zeit: ${state.elapsedMs} ms", color = TextSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+
+                        OutlinedButton(
+                            onClick = { viewModel.requestAbort() },
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = LaserCrimson),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Initialisierung abbrechen")
+                        }
+                    }
+                }
+            }
+
+            else -> {}
+        }
+    }
+}
+
+@Composable
+fun StatusDisplayCard(modelState: ModelLifecycleState) {
+    val (statusText, statusColor, desc) = when (modelState) {
+        is ModelLifecycleState.Unloaded -> Triple("Kein Modell ausgewählt", TextSecondary, "Bitte lade ein GGUF-Modell, um Inferenzfunktionen zu testen.")
+        is ModelLifecycleState.ModelSelected -> Triple("Modell ausgewählt", ElectricAmber, "Datei verifiziert. Bereit zur nativen Initialisierung.")
+        is ModelLifecycleState.Initializing -> Triple("Initialisierung läuft", ElectricAmber, "Modell wird in den Arbeitsspeicher geladen und der KV-Cache aufgebaut.")
+        is ModelLifecycleState.Ready -> Triple("Modell erfolgreich geladen", MatrixGreen, "Engine ist aktiv. Volle lokale Inferenz ist betriebsbereit.")
+        is ModelLifecycleState.InferenceRunning -> Triple("Inferenz läuft", NeonCyan, "Modell generiert Tokens...")
+        is ModelLifecycleState.Aborting -> Triple("Modell wird entladen / Abort aktiv", LaserCrimson, "Natives Signal gesendet.")
+        is ModelLifecycleState.Error -> Triple("Modellinitialisierung fehlgeschlagen", LaserCrimson, modelState.errorMessage)
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, statusColor.copy(alpha = 0.5f))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(12.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(statusColor)
+            )
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = statusText,
+                    color = statusColor,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = desc,
+                    color = TextSecondary,
+                    fontSize = 12.sp
+                )
+            }
+        }
+    }
+}

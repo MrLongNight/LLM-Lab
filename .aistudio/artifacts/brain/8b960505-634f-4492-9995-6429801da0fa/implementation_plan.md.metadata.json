@@ -1,0 +1,6 @@
+{
+  "summary":  "Umfassender Architektur- und Implementierungsplan für das LLM Lab – Mobile Inference Testbench mit nativer llama.cpp GGUF-Engine, robuster JNI-Bridge, konfigurierbaren n_ubatch-Profilen, 7 standardisierten Testlabor-Fällen, 20x Stresstest, Echtzeit-Diagnose und TXT/JSON-Export.",
+  "updatedAt":  "2026-10-30T22:27:28.992278815Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

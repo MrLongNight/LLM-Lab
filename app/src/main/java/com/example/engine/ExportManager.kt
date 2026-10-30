@@ -1,0 +1,171 @@
+package com.example.engine
+
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import androidx.core.content.FileProvider
+import com.example.data.TestRunEntity
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+object ExportManager {
+
+    fun generateJson(
+        context: Context,
+        runs: List<TestRunEntity>,
+        config: InferenceConfig,
+        telemetry: SystemTelemetry,
+        engineVersion: String,
+        modelName: String,
+        modelSizeFormatted: String
+    ): String {
+        val root = JSONObject()
+        val nowStr = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.GERMANY).format(Date())
+
+        root.put("exportTimestamp", nowStr)
+        root.put("appVersion", "1.0-testbench")
+        root.put("androidVersion", "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+        root.put("deviceModel", "${Build.MANUFACTURER} ${Build.MODEL}")
+        root.put("cpuArch", telemetry.cpuArch)
+        root.put("cpuCores", telemetry.cpuCores)
+        root.put("thermalStatus", telemetry.thermalStatus)
+        root.put("engineVersion", engineVersion)
+        root.put("modelName", modelName)
+        root.put("modelSize", modelSizeFormatted)
+
+        val params = JSONObject()
+        params.put("profile", config.selectedProfile.name)
+        params.put("n_ctx", config.nCtx)
+        params.put("n_batch", config.nBatch)
+        params.put("n_ubatch", config.nUbatch)
+        params.put("n_threads", config.nThreads)
+        params.put("temperature", config.temperature)
+        params.put("max_tokens", config.maxTokens)
+        params.put("timeout_init_sec", config.timeoutInitSec)
+        params.put("timeout_short_sec", config.timeoutShortTestSec)
+        params.put("timeout_normal_sec", config.timeoutNormalInferenceSec)
+        params.put("timeout_stress_sec", config.timeoutStressTestSec)
+        root.put("inferenceParameters", params)
+
+        val memory = JSONObject()
+        memory.put("javaHeapUsedMb", telemetry.javaHeapUsedMb)
+        memory.put("javaHeapMaxMb", telemetry.javaHeapMaxMb)
+        memory.put("nativeHeapAllocatedMb", telemetry.nativeHeapAllocatedMb)
+        memory.put("systemAvailableRamMb", telemetry.systemAvailableRamMb)
+        memory.put("systemTotalRamMb", telemetry.systemTotalRamMb)
+        root.put("systemTelemetry", memory)
+
+        val runsArray = JSONArray()
+        for (r in runs) {
+            val obj = JSONObject()
+            obj.put("id", r.id)
+            obj.put("timestamp", SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.GERMANY).format(Date(r.timestamp)))
+            obj.put("category", r.testCategory)
+            obj.put("title", r.testTitle)
+            obj.put("promptLength", r.promptText.length)
+            obj.put("responseSample", r.responseText.take(200))
+            obj.put("promptTokens", r.promptTokens)
+            obj.put("generatedTokens", r.generatedTokens)
+            obj.put("promptEvalDurationMs", r.promptEvalDurationMs)
+            obj.put("generationDurationMs", r.generationDurationMs)
+            obj.put("totalDurationMs", r.totalDurationMs)
+            obj.put("tokensPerSecond", r.tokensPerSecond)
+            obj.put("finishReason", r.finishReason)
+            obj.put("isSuccess", r.isSuccess)
+            obj.put("errorMessage", r.errorMessage ?: JSONObject.NULL)
+            runsArray.put(obj)
+        }
+        root.put("testResults", runsArray)
+
+        return root.toString(2)
+    }
+
+    fun generateTxt(
+        context: Context,
+        runs: List<TestRunEntity>,
+        config: InferenceConfig,
+        telemetry: SystemTelemetry,
+        engineVersion: String,
+        modelName: String,
+        modelSizeFormatted: String
+    ): String {
+        val sb = StringBuilder()
+        val nowStr = SimpleDateFormat("dd.MM.yyyy HH:mm:ss", Locale.GERMANY).format(Date())
+
+        sb.appendLine("================================================================================")
+        sb.appendLine("        LLM LAB - MOBILE INFERENCE TESTBENCH : DIAGNOSEBERICHT")
+        sb.appendLine("================================================================================")
+        sb.appendLine("Erstellungszeitpunkt : $nowStr")
+        sb.appendLine("App-Version          : 1.0 (Mobile Inference Testbench)")
+        sb.appendLine("Android-Version      : Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+        sb.appendLine("Gerät / Hardware     : ${Build.MANUFACTURER} ${Build.MODEL} (${telemetry.cpuArch}, ${telemetry.cpuCores} Kerne)")
+        sb.appendLine("Thermal Status       : ${telemetry.thermalStatus}")
+        sb.appendLine("Engine / Commit      : $engineVersion")
+        sb.appendLine("GGUF Modell          : $modelName ($modelSizeFormatted)")
+        sb.appendLine("--------------------------------------------------------------------------------")
+        sb.appendLine("INFERENZ-PARAMETER:")
+        sb.appendLine("  Profil             : ${config.selectedProfile.label}")
+        sb.appendLine("  Context (n_ctx)    : ${config.nCtx}")
+        sb.appendLine("  Batch (n_batch)    : ${config.nBatch}")
+        sb.appendLine("  Micro-Batch (n_ub) : ${config.nUbatch}")
+        sb.appendLine("  Threads            : ${config.nThreads}")
+        sb.appendLine("  Temperatur         : ${config.temperature}")
+        sb.appendLine("  Max Tokens         : ${config.maxTokens}")
+        sb.appendLine("--------------------------------------------------------------------------------")
+        sb.appendLine("SPEICHER-TELEMETRIE:")
+        sb.appendLine("  Java Heap Belegt   : ${"%.1f".format(telemetry.javaHeapUsedMb)} MB / Max: ${"%.1f".format(telemetry.javaHeapMaxMb)} MB")
+        sb.appendLine("  Native Heap Belegt : ${"%.1f".format(telemetry.nativeHeapAllocatedMb)} MB")
+        sb.appendLine("  System-RAM         : Verfügbar ${"%.0f".format(telemetry.systemAvailableRamMb)} MB von ${"%.0f".format(telemetry.systemTotalRamMb)} MB")
+        sb.appendLine("================================================================================")
+        sb.appendLine("DOKUMENTIERTE TESTLÄUFE (${runs.size} Durchläufe):")
+        sb.appendLine("--------------------------------------------------------------------------------")
+
+        if (runs.isEmpty()) {
+            sb.appendLine("  (Keine Testläufe in der Datenbank vorhanden)")
+        } else {
+            runs.forEachIndexed { index, r ->
+                val timeStr = SimpleDateFormat("HH:mm:ss", Locale.GERMANY).format(Date(r.timestamp))
+                sb.appendLine("Test #${index + 1} [$timeStr] : ${r.testTitle} [${r.testCategory}]")
+                sb.appendLine("  Status            : ${if (r.isSuccess) "ERFOLGREICH" else "FEHLGESCHLAGEN"} (Grund: ${r.finishReason})")
+                sb.appendLine("  Prompt Tokens     : ${r.promptTokens} | Generierte Tokens: ${r.generatedTokens}")
+                sb.appendLine("  Prompt-Eval Dauer : ${r.promptEvalDurationMs} ms")
+                sb.appendLine("  Generierungsdauer : ${r.generationDurationMs} ms")
+                sb.appendLine("  Durchsatz         : ${"%.2f".format(r.tokensPerSecond)} Tokens/s")
+                sb.appendLine("  Gesamtdauer       : ${r.totalDurationMs} ms")
+                if (r.errorMessage != null) {
+                    sb.appendLine("  Fehler            : ${r.errorMessage}")
+                }
+                sb.appendLine("  Antwort-Auszug    : ${r.responseText.take(120).replace("\n", " ")}")
+                sb.appendLine("--------------------------------------------------------------------------------")
+            }
+        }
+        sb.appendLine("================================================================================")
+        sb.appendLine("ENDE DES DIAGNOSEBERICHTS")
+        return sb.toString()
+    }
+
+    fun shareExport(context: Context, content: String, fileName: String, mimeType: String) {
+        val exportDir = File(context.cacheDir, "exports")
+        if (!exportDir.exists()) exportDir.mkdirs()
+        val file = File(exportDir, fileName)
+        file.writeText(content)
+
+        val uri: Uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            file
+        )
+
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = mimeType
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "Diagnosebericht exportieren"))
+    }
+}
