@@ -22,30 +22,39 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Set up Android SDK, NDK & CMake
-        uses: android-actions/setup-android@v3
+      - name: Accept Android SDK Licenses
+        run: |
+          mkdir -p "${ANDROID_HOME}/licenses"
+          echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" >> "${ANDROID_HOME}/licenses/android-sdk-license"
+          echo "d56f5187479451eabf01fb78af6dfcb131a6481e" >> "${ANDROID_HOME}/licenses/android-sdk-license"
+          echo "8933bad161af4178b1185d1a37fbf41ea5269c55" >> "${ANDROID_HOME}/licenses/android-sdk-license"
+          echo "84831b9409646a245e303448c1ec612ab0ec86a9" >> "${ANDROID_HOME}/licenses/android-sdk-preview-license"
+          echo "601085b94cd77f0b54ff86406955d9941874fe0f" >> "${ANDROID_HOME}/licenses/android-googletv-license"
+          echo "859f317696e3f23621d44d423c8b623a32246152" >> "${ANDROID_HOME}/licenses/android-sdk-arm-dbt-license"
+          echo "25884f5d56b029b114e7f7ac690f6641e23a30dc" >> "${ANDROID_HOME}/licenses/google-gdk-license"
+          echo "e9acab587ff1b6049bfac544f7c2203d1744354e" >> "${ANDROID_HOME}/licenses/mips-android-sysimage-license"
+          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
 
       - name: Install NDK and CMake
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "cmake;3.22.1" "ndk;26.3.11579264"
+          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "cmake;3.22.1" "ndk;26.3.11579264"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Grant Execute Permission to Gradlew
+        run: chmod +x gradlew
+
       - name: Run Unit & Robolectric Tests
-        run: |
-          chmod +x gradlew
-          ./gradlew testDebugUnitTest --continue
+        run: ./gradlew testDebugUnitTest --continue
 
       - name: Build Debug APK
-        run: |
-          ./gradlew assembleDebug --stacktrace
+        run: ./gradlew assembleDebug --stacktrace
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
