@@ -10,6 +10,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -56,7 +58,7 @@ class MainActivity : ComponentActivity() {
 
                 val navItems = listOf(
                     NavTabItem("Modell", Icons.Filled.Layers, Icons.Outlined.Layers, "nav_model"),
-                    NavTabItem("Chat", Icons.Filled.Chat, Icons.Outlined.Chat, "nav_chat"),
+                    NavTabItem("Chat", Icons.AutoMirrored.Filled.Chat, Icons.AutoMirrored.Outlined.Chat, "nav_chat"),
                     NavTabItem("Labor", Icons.Filled.Science, Icons.Outlined.Science, "nav_lab"),
                     NavTabItem("Bench", Icons.Filled.Speed, Icons.Outlined.Speed, "nav_bench"),
                     NavTabItem("Diagnose", Icons.Filled.Analytics, Icons.Outlined.Analytics, "nav_diagnose"),
