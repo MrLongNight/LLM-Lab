@@ -36,5 +36,17 @@ data class TestRunEntity(
     @ColumnInfo(defaultValue = "0")
     val promptDecodeCalls: Int = 0,
     @ColumnInfo(defaultValue = "0")
-    val generationDecodeCalls: Int = 0
+    val generationDecodeCalls: Int = 0,
+    @ColumnInfo(defaultValue = "4")
+    val nThreadsBatch: Int = 4,
+    @ColumnInfo(defaultValue = "'AUTO'")
+    val backendPreference: String = "AUTO",
+    @ColumnInfo(defaultValue = "'CPU'")
+    val activeBackend: String = "CPU",
+    @ColumnInfo(defaultValue = "0.2")
+    val temperature: Float = 0.2f,
+    @ColumnInfo(defaultValue = "20")
+    val topK: Int = 20,
+    @ColumnInfo(defaultValue = "0.8")
+    val topP: Float = 0.8f
 )
