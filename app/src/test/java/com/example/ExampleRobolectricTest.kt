@@ -170,6 +170,18 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun `verify PromptLab and Diagnose provide bounded scroll lists`() {
+        val promptScreen = java.io.File("src/main/java/com/example/ui/screens/PromptLabScreen.kt").readText()
+        val diagnoseScreen = java.io.File("src/main/java/com/example/ui/screens/DiagnoseScreen.kt").readText()
+
+        assertTrue(promptScreen.contains(".weight(1f)"))
+        assertTrue(promptScreen.contains("testTag(\"prompt_test_list\")"))
+        assertTrue(promptScreen.contains(".heightIn(max = 120.dp)"))
+        assertTrue(diagnoseScreen.contains(".weight(1f)"))
+        assertTrue(diagnoseScreen.contains("testTag(\"diagnose_history_list\")"))
+    }
+
+    @Test
     fun `verify MainActivity onCreate launches cleanly`() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario.onActivity { activity ->

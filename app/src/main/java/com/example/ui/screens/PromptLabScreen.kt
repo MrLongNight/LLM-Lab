@@ -3,6 +3,8 @@ package com.example.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -121,7 +123,10 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
                             color = TextPrimary,
                             fontSize = 12.sp,
                             fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.padding(10.dp)
+                            modifier = Modifier
+                                .padding(10.dp)
+                                .heightIn(max = 120.dp)
+                                .verticalScroll(rememberScrollState())
                         )
                     }
 
@@ -141,7 +146,10 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
 
         // Testfall-Liste
         LazyColumn(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .testTag("prompt_test_list"),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             items(PromptTestCatalog.ALL_TESTS, key = { it.id }) { testCase ->

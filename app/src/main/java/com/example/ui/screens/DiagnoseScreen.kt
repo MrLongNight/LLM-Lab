@@ -91,7 +91,10 @@ fun DiagnoseScreen(viewModel: LLMLabViewModel) {
         Spacer(modifier = Modifier.height(12.dp))
 
         LazyColumn(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .testTag("diagnose_history_list"),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // Hardware-Ressourcen Kacheln
@@ -217,7 +220,7 @@ fun DiagnoseScreen(viewModel: LLMLabViewModel) {
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text("Context Size (n_ctx):", color = TextSecondary, fontSize = 12.sp)
-                            Text("${config.nCtx}", color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                            Text("${ready?.loadedConfig?.nCtx ?: config.nCtx}", color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                         }
 
                         Row(
@@ -225,7 +228,7 @@ fun DiagnoseScreen(viewModel: LLMLabViewModel) {
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text("Batch (n_batch):", color = TextSecondary, fontSize = 12.sp)
-                            Text("${config.nBatch}", color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                            Text("${ready?.loadedConfig?.nBatch ?: config.nBatch}", color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                         }
 
                         Row(
@@ -233,15 +236,30 @@ fun DiagnoseScreen(viewModel: LLMLabViewModel) {
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text("Micro-Batch (n_ubatch):", color = TextSecondary, fontSize = 12.sp)
-                            Text("${config.nUbatch}", color = NeonCyan, fontSize = 12.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                            Text("${ready?.loadedConfig?.nUbatch ?: config.nUbatch}", color = NeonCyan, fontSize = 12.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
                         }
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text("Threads:", color = TextSecondary, fontSize = 12.sp)
-                            Text("${config.nThreads}", color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                            Text("Threads Generation:", color = TextSecondary, fontSize = 12.sp)
+                            Text("${ready?.loadedConfig?.nThreads ?: config.nThreads}", color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Threads Prompt-Prefill:", color = TextSecondary, fontSize = 12.sp)
+                            Text("${ready?.loadedConfig?.nThreadsBatch ?: config.nThreadsBatch}", color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Aktives Backend:", color = TextSecondary, fontSize = 12.sp)
+                            Text(ready?.activeBackendName ?: "Nicht geladen", color = NeonCyan, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                        }
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Sampling (aktuell):", color = TextSecondary, fontSize = 12.sp)
+                            Text("T=${config.temperature} · K=${config.topK} · P=${config.topP}", color = TextPrimary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                         }
                     }
                 }
