@@ -140,7 +140,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     private val _exportStatus = MutableStateFlow<String?>(null)
     val exportStatus: StateFlow<String?> = _exportStatus.asStateFlow()
 
-    val testRunHistory = dao.getAllRuns().stateIn(
+    val testRunHistory = dao.getRecentRuns(200).stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
         emptyList()
@@ -967,7 +967,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             val context = getApplication<Application>()
             _exportStatus.value = "Diagnoseexport wird vorbereitet..."
             try {
-                val runs = testRunHistory.value
+                val runs = testRunHistory.value.take(200)
                 val engineVer = nativeBridge.getEngineVersion()
                 val state = _modelState.value
                 val selectedModel = when (state) {
@@ -998,7 +998,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     ExportManager.shareExport(context, report, fileName, if (asJson) "application/json" else "text/plain")
                     _exportStatus.value = "Exportdatei erstellt. Android-Teilen-Dialog geöffnet."
                 }
-            } catch (error: Exception) {
+            } catch (error: Throwable) {
                 Log.e("LLMLabViewModel", "Diagnoseexport fehlgeschlagen", error)
                 val errorFile = File(context.filesDir, "llmlab-last-export-error.txt")
                 runCatching {

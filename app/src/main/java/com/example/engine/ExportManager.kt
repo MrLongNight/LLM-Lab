@@ -1,5 +1,6 @@
 package com.example.engine
 
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -194,20 +195,33 @@ object ExportManager {
         if (!exportDir.exists() && !exportDir.mkdirs()) {
             throw java.io.IOException("Exportverzeichnis konnte nicht erstellt werden: ${exportDir.absolutePath}")
         }
-        val file = File(exportDir, fileName)
+        val safeName = fileName.substringAfterLast('/').substringAfterLast('\\')
+        require(safeName.matches(Regex("[A-Za-z0-9._-]{1,120}"))) { "Ungültiger Exportdateiname" }
+        val file = File(exportDir, safeName)
         file.writeText(content, Charsets.UTF_8)
+        if (!file.isFile || file.length() == 0L) {
+            throw java.io.IOException("Exportdatei wurde nicht korrekt geschrieben.")
+        }
+
+        exportDir.listFiles()
+            ?.filter { it != file && System.currentTimeMillis() - it.lastModified() > 24L * 60L * 60L * 1000L }
+            ?.forEach { it.delete() }
 
         val uri: Uri = FileProvider.getUriForFile(
             context,
-            "${context.packageName}.fileprovider",
+            "${context.packageName}.fileprovider"
             file
         )
 
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = mimeType
             putExtra(Intent.EXTRA_STREAM, uri)
+            clipData = ClipData.newUri(context.contentResolver, safeName, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        context.startActivity(createChooserIntent(intent, "Diagnosebericht exportieren"))
+        val chooser = createChooserIntent(intent, "Diagnosebericht exportieren").apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(chooser)
     }
 }
