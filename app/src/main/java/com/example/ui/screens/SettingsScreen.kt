@@ -241,6 +241,41 @@ fun SettingsScreen(viewModel: LLMLabViewModel) {
             }
         }
 
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = DarkSurface),
+            border = androidx.compose.foundation.BorderStroke(1.dp, DarkCardBorder)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Prompt-Batch (n_batch)", color = NeonCyan, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Text("Maximale Prompt-Batchgröße. Änderungen werden erst nach erneutem Laden des Modells aktiv.", color = TextSecondary, fontSize = 11.sp)
+                Text("Aktuell: ${config.nBatch}", color = TextPrimary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(128, 256, 512, 1024).filter { it <= config.nCtx }.forEach { batchValue ->
+                        FilterChip(
+                            selected = config.nBatch == batchValue,
+                            onClick = {
+                                viewModel.updateConfig(
+                                    config.copy(
+                                        nBatch = batchValue,
+                                        nUbatch = config.nUbatch.coerceAtMost(batchValue)
+                                    )
+                                )
+                            },
+                            label = { Text("$batchValue", fontSize = 12.sp, fontFamily = FontFamily.Monospace) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = NeonCyan,
+                                selectedLabelColor = Color.Black,
+                                containerColor = DarkSurfaceVariant,
+                                labelColor = TextPrimary
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
         // Manuelle Inferenzparameter
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -307,7 +342,16 @@ fun SettingsScreen(viewModel: LLMLabViewModel) {
                     }
                     Slider(
                         value = config.nCtx.toFloat(),
-                        onValueChange = { viewModel.updateConfig(config.copy(nCtx = it.toInt())) },
+                        onValueChange = {
+                            val newCtx = it.toInt()
+                            viewModel.updateConfig(
+                                config.copy(
+                                    nCtx = newCtx,
+                                    nBatch = config.nBatch.coerceAtMost(newCtx),
+                                    nUbatch = config.nUbatch.coerceAtMost(config.nBatch.coerceAtMost(newCtx))
+                                )
+                            )
+                        },
                         valueRange = 512f..4096f,
                         steps = 6,
                         colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan)
@@ -331,6 +375,14 @@ fun SettingsScreen(viewModel: LLMLabViewModel) {
                 Slider(value = config.topK.toFloat(), onValueChange = { viewModel.updateConfig(config.copy(topK = it.toInt().coerceIn(1, 100))) }, valueRange = 1f..100f, steps = 98, colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan))
                 Text("Top-P: ${"%.2f".format(config.topP)}", color = TextSecondary, fontSize = 12.sp)
                 Slider(value = config.topP, onValueChange = { viewModel.updateConfig(config.copy(topP = it.coerceIn(0.1f, 1f))) }, valueRange = 0.1f..1f, steps = 8, colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan))
+                Text("Maximale Antwortlänge: ${config.maxTokens} Tokens", color = TextSecondary, fontSize = 12.sp)
+                Slider(
+                    value = config.maxTokens.toFloat(),
+                    onValueChange = { viewModel.updateConfig(config.copy(maxTokens = it.toInt().coerceIn(32, 512))) },
+                    valueRange = 32f..512f,
+                    steps = 14,
+                    colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan)
+                )
             }
         }
 

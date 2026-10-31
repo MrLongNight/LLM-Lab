@@ -48,5 +48,9 @@ data class TestRunEntity(
     @ColumnInfo(defaultValue = "20")
     val topK: Int = 20,
     @ColumnInfo(defaultValue = "0.8")
-    val topP: Float = 0.8f
+    val topP: Float = 0.8f,
+    @ColumnInfo(defaultValue = "160")
+    val maxTokens: Int = 160,
+    @ColumnInfo(defaultValue = "NULL")
+    val appCpuUsagePercent: Float? = null
 )

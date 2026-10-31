@@ -5,6 +5,8 @@ import android.content.Context
 import android.os.Build
 import android.os.Debug
 import android.os.PowerManager
+import android.os.Process
+import android.os.SystemClock
 import java.io.File
 
 data class SystemTelemetry(
@@ -19,10 +21,33 @@ data class SystemTelemetry(
     val cpuArch: String,
     val cpuCores: Int,
     val thermalStatus: String,
-    val isLowMemory: Boolean
+    val isLowMemory: Boolean,
+    val appCpuUsagePercent: Float?
 )
 
 object SystemTelemetryManager {
+    private val cpuSampleLock = Any()
+    private var lastCpuTimeMs: Long? = null
+    private var lastWallTimeMs: Long? = null
+
+    private fun sampleAppCpuPercent(coreCount: Int): Float? = synchronized(cpuSampleLock) {
+        val cpuNow = Process.getElapsedCpuTime()
+        val wallNow = SystemClock.elapsedRealtime()
+        val cpuPrevious = lastCpuTimeMs
+        val wallPrevious = lastWallTimeMs
+        lastCpuTimeMs = cpuNow
+        lastWallTimeMs = wallNow
+
+        if (cpuPrevious == null || wallPrevious == null) return@synchronized null
+        val cpuDelta = cpuNow - cpuPrevious
+        val wallDelta = wallNow - wallPrevious
+        if (cpuDelta < 0L || wallDelta <= 0L || coreCount <= 0) return@synchronized null
+
+        // 100% means the app process consumed one full logical CPU on average.
+        ((cpuDelta.toDouble() / (wallDelta.toDouble() * coreCount)) * 100.0)
+            .toFloat()
+            .coerceIn(0f, 100f)
+    }
 
     fun capture(context: Context): SystemTelemetry {
         // Java Heap
@@ -75,7 +100,8 @@ object SystemTelemetryManager {
         }
 
         val arch = if (Build.SUPPORTED_ABIS.isNotEmpty()) Build.SUPPORTED_ABIS[0] else "Nicht verfügbar"
-        val cores = Runtime.getRuntime().availableProcessors()
+        val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        val appCpuUsage = sampleAppCpuPercent(cores)
 
         return SystemTelemetry(
             javaHeapUsedMb = javaUsed,
@@ -89,7 +115,8 @@ object SystemTelemetryManager {
             cpuArch = arch,
             cpuCores = cores,
             thermalStatus = thermalStr,
-            isLowMemory = isLowMem
+            isLowMemory = isLowMem,
+            appCpuUsagePercent = appCpuUsage
         )
     }
 }

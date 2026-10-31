@@ -157,7 +157,12 @@ fun DiagnoseScreen(viewModel: LLMLabViewModel) {
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text("CPU-Auslastung:", color = TextSecondary, fontSize = 12.sp)
-                            Text("Nicht verfügbar (Android Sandbox Restriktion)", color = TextMuted, fontSize = 11.sp)
+                            Text(
+                                telemetry.appCpuUsagePercent?.let { "${"%.1f".format(it)}% (LLM-Lab-Prozess)" } ?: "Nicht verfügbar (noch kein Messintervall)",
+                                color = TextPrimary,
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
                         }
                     }
                 }
