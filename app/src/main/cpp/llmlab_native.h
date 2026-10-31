@@ -3,14 +3,15 @@
 
 #include <jni.h>
 #include <llama.h>
+#include <ggml-backend.h>
 
 #include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
 
-#define LLAMACPP_TARGET_VERSION "b3600"
-#define LLAMACPP_COMMIT_HASH "2fb9267887d24a431892ce4dccc75c7095b0d54d"
+#define LLAMACPP_TARGET_VERSION "b11998"
+#define LLAMACPP_COMMIT_HASH "78feec062d50ec9e8940244cac918ac4480b60cb"
 
 struct NativeInferenceConfig {
     int n_ctx = 2048;
@@ -80,6 +81,7 @@ private:
     std::string loaded_model_architecture;
     std::string active_backend_name = "CPU";
     int active_gpu_layers_requested = 0;
+    ggml_backend_dev_t active_backend_device = nullptr;
     NativeInferenceConfig active_config;
 };
 
