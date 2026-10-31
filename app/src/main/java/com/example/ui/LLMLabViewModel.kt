@@ -111,10 +111,12 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     private val _config = MutableStateFlow(InferenceConfig.fromPreset(ProfilePreset.BALANCED))
     val config: StateFlow<InferenceConfig> = _config.asStateFlow()
 
+    private val welcomeMessageId = java.util.UUID.randomUUID().toString()
     private val _chatMessages = MutableStateFlow<List<ChatMessage>>(listOf(
         ChatMessage(
+            id = welcomeMessageId,
             isUser = false,
-            text = "Willkommen im LLM Lab – Mobile Inference Testbench.\nBitte wähle unter 'Modell' die Datei 'qwen2.5-1.5b-instruct-q4_k_m.gguf' aus, um echte On-Device Inferenz zu starten."
+            text = "Willkommen im LLM Lab. Wähle im Bereich Modell eine GGUF-Datei aus und initialisiere sie für lokale Inferenz."
         )
     ))
     val chatMessages: StateFlow<List<ChatMessage>> = _chatMessages.asStateFlow()
@@ -254,6 +256,12 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private fun updateWelcomeMessage(text: String) {
+        _chatMessages.value = _chatMessages.value.map { message ->
+            if (message.id == welcomeMessageId) message.copy(text = text) else message
+        }
+    }
+
     fun selectTab(index: Int) {
         _currentTab.value = index
     }
@@ -286,7 +294,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val context = getApplication<Application>()
-                var fileName = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+                var fileName = "Unbekanntes GGUF-Modell"
                 var fileSize = 0L
 
                 context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
@@ -440,6 +448,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                         "Die native Modellinitialisierung hat nicht rechtzeitig auf den Abbruch reagiert. Bitte App neu starten."
                     )
                 } else {
+                    updateWelcomeMessage("Modell ${selected.fileName} ist lokal geladen und einsatzbereit. Stelle jetzt deine Frage im Chat oder starte einen Test im Prompt-Labor.")
                     _modelState.value = ModelLifecycleState.Ready(
                         fileName = selected.fileName,
                         fileSizeBytes = cacheModel.length(),
@@ -467,6 +476,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
         launchEngineOperation {
             _modelState.value = ModelLifecycleState.Aborting
             nativeBridge.unloadModel()
+            updateWelcomeMessage("Modell entladen. Wähle im Bereich Modell erneut eine GGUF-Datei aus, um die lokale Inferenz zu starten.")
             _modelState.value = lastModelSelection ?: ModelLifecycleState.Unloaded
         }
     }
@@ -554,7 +564,21 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             _chatMessages.value = _chatMessages.value.map { message ->
                 if (message.id == assistantPlaceholderId) {
                     message.copy(
-                        text = if (response.isEmpty()) (finalMetrics.errorMessage ?: "Keine Modellantwort erhalten.") else response,
+                        text = when (finalMetrics.finishReason) {
+                            "TIMEOUT" -> if (response.isBlank()) {
+                                "UNVOLLSTÄNDIG: Das Zeitlimit wurde erreicht. ${finalMetrics.errorMessage.orEmpty()}"
+                            } else {
+                                "UNVOLLSTÄNDIGE ANTWORT – Zeitlimit erreicht (${finalMetrics.totalDurationMs} ms). Nicht als vollständige Antwort werten.\n\n$response"
+                            }
+                            "ABORTED_BY_USER" -> if (response.isBlank()) {
+                                "ABGEBROCHEN: ${finalMetrics.errorMessage.orEmpty()}"
+                            } else {
+                                "ABGEBROCHENE TEILANTWORT – keine vollständige Antwort.\n\n$response"
+                            }
+                            "NATIVE_ERROR" -> "INFERENZFEHLER: ${finalMetrics.errorMessage.orEmpty()}" +
+                                if (response.isBlank()) "" else "\n\nTeiltext:\n$response"
+                            else -> if (response.isEmpty()) "Keine Modellantwort erhalten." else response
+                        },
                         metrics = finalMetrics,
                         isStreaming = false
                     )

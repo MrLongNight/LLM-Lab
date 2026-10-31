@@ -126,7 +126,7 @@ fun ChatScreen(viewModel: LLMLabViewModel) {
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (isAborting) "Native Abort-Signal gesendet" else "Native Tokens: ${runState?.tokenCount ?: 0} | Generierung läuft",
+                            text = if (isAborting) "Native Abort-Signal gesendet" else if (runState?.progressPercent != null) "Prompt-Evaluierung: ${runState.progressPercent.toInt()}%" else "Token-Generierung: ${runState?.tokenCount ?: 0} Tokens",
                             color = if (isAborting) LaserCrimson else NeonCyan,
                             fontSize = 12.sp,
                             fontFamily = FontFamily.Monospace,
