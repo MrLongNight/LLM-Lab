@@ -38,6 +38,32 @@ get_filename_component(LLAMA_CPP_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../../../..
 if(NOT EXISTS "${LLAMA_CPP_SOURCE}/CMakeLists.txt")
     message(FATAL_ERROR "Pinned llama.cpp sources are missing. Run git submodule update --init --recursive")
 endif()
+# Android's CMake toolchain restricts package lookup to the Android sysroot.
+# SPIRV-Headers is a host-only, header-only dependency used while compiling
+# ggml-vulkan. Resolve Debian/Ubuntu's host package explicitly for cross builds.
+if(ANDROID AND NOT DEFINED SPIRV-Headers_DIR)
+    find_file(LLMLAB_SPIRV_HEADERS_CONFIG
+        NAMES SPIRV-HeadersConfig.cmake
+        PATHS
+            /usr/share/cmake/SPIRV-Headers
+            /usr/local/share/cmake/SPIRV-Headers
+        NO_DEFAULT_PATH
+        NO_CMAKE_FIND_ROOT_PATH
+    )
+    if(LLMLAB_SPIRV_HEADERS_CONFIG)
+        get_filename_component(
+            LLMLAB_SPIRV_HEADERS_CONFIG_DIR
+            "${LLMLAB_SPIRV_HEADERS_CONFIG}"
+            DIRECTORY
+        )
+        set(
+            SPIRV-Headers_DIR
+            "${LLMLAB_SPIRV_HEADERS_CONFIG_DIR}"
+            CACHE PATH "Host SPIRV-Headers CMake package directory"
+        )
+    endif()
+endif()
+
 add_subdirectory("${LLAMA_CPP_SOURCE}" "${CMAKE_BINARY_DIR}/llama.cpp" EXCLUDE_FROM_ALL)
 add_library(llmlab_native SHARED llmlab_native.cpp)
 target_include_directories(llmlab_native PRIVATE "${LLAMA_CPP_SOURCE}/include" "${LLAMA_CPP_SOURCE}/ggml/include")

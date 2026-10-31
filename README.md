@@ -5,17 +5,17 @@ Eigenständige Android-Test-App zur Untersuchung echter lokaler GGUF-Inferenz au
 ## Architektur und harte Grenzen
 
 - Android, Kotlin, Jetpack Compose, Room und C++/JNI.
-- Native Engine: `llama.cpp` Tag `b3600`, fest gepinnt auf Commit `2fb9267887d24a431892ce4dccc75c7095b0d54d` als Git-Submodul unter `third_party/llama.cpp`.
+- Native Engine: `llama.cpp`, fest gepinnt als Git-Submodul unter `third_party/llama.cpp` auf Commit `78feec062d50ec9e8940244cac918ac4480b60cb` (API-Version `0.8.0-dev`).
 - CPU ist immer als sicherer Fallback einkompiliert. Vulkan wird zusätzlich als generisches GPU-Backend gebaut; ob es auf einem Gerät initialisierbar ist, wird zur Laufzeit über die llama.cpp-Registry geprüft. CUDA/Metal sind auf Android nicht aktiviert. Hersteller-NPUs (z. B. Qualcomm QNN/Hexagon oder MediaTek NeuroPilot) benötigen jeweils eigene SDK-/Backend-Adapter und sind in diesem Build noch nicht enthalten.
 - GGUF-Modell wird über den Android-Dateiauswahldialog ausgewählt und vor dem nativen Laden in den internen App-Speicher kopiert. Das Modell ist nicht in der APK enthalten.
-- Eigenständige Package-ID: `de.mrlongnight.llmlab`; `minSdk=29` (Android 10), `targetSdk=36`, ABI `arm64-v8a`.
+- Eigenständige Package-ID: `de.mrlongnight.llmlab`; `minSdk=29` (Android 10), `targetSdk=36`, ABIs `arm64-v8a` und `x86_64`.
 - Keine Firebase-, Gemini-, Cloud-, Login- oder externen KI-API-Abhängigkeiten. Das Manifest fordert keine Internet-Berechtigung an und Android-App-Backup ist deaktiviert.
 
 Die App darf „Modell bereit“ erst anzeigen, wenn `llama_load_model_from_file` und `llama_new_context_with_model` erfolgreich zurückgekehrt sind. Bei fehlender nativer Bibliothek gibt es keinen JVM-Ersatzpfad. Die Backend-Registry meldet pro Backend Initialisierbarkeit und Abbruchfähigkeit. In llama.cpp b3600 ist `abort_callback` laut Header nur bei CPU-Ausführung unterstützt: AUTO bevorzugt daher den sicher abbrechbaren CPU-Pfad; GPU-Offload ist ein ausdrücklich experimenteller Testmodus.
 
 ## Build und Tests
 
-Voraussetzungen: JDK 21, Android SDK, Android NDK `26.3.11579264`, CMake `3.22.1` und Git-Submodule-Unterstützung.
+Voraussetzungen: JDK 21, Android SDK, Android NDK `30.0.16248370`, CMake `3.31.6` und Git-Submodule-Unterstützung. Für den Vulkan-Host-Build unter Ubuntu/Debian werden außerdem `glslc`, `libvulkan-dev` und `spirv-headers` benötigt.
 
 ```bash
 git clone --recurse-submodules https://github.com/MrLongNight/LLM-Lab.git
