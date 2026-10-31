@@ -65,6 +65,13 @@ android {
     buildConfig = true
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
+  // llama.cpp discovers CPU/Vulkan backend plugins by scanning nativeLibraryDir.
+  // Keep the .so files extractable as real filesystem entries on Android.
+  packaging {
+    jniLibs {
+      useLegacyPackaging = true
+    }
+  }
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true
