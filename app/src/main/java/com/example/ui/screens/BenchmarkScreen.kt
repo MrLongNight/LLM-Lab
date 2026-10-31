@@ -28,7 +28,9 @@ fun BenchmarkScreen(viewModel: LLMLabViewModel) {
     val bench by viewModel.benchmarkSummary.collectAsState()
     val config by viewModel.config.collectAsState()
 
-    val isModelReady = modelState is ModelLifecycleState.Ready
+    val readyState = modelState as? ModelLifecycleState.Ready
+    val isModelReady = readyState != null
+    val contextReloadRequired = readyState != null && !readyState.loadedConfig.hasSameNativeContext(config)
 
     Column(
         modifier = Modifier
@@ -83,10 +85,14 @@ fun BenchmarkScreen(viewModel: LLMLabViewModel) {
                             fontSize = 16.sp
                         )
                         Text(
-                            text = "Profil: ${config.selectedProfile.label} (n_ubatch=${config.nUbatch})",
+                            text = readyState?.let { "Geladener Context: n_ubatch=${it.loadedConfig.nUbatch} (n_ctx=${it.loadedConfig.nCtx}, Batch=${it.loadedConfig.nBatch}, Threads=${it.loadedConfig.nThreads})" } ?: "Kein Context geladen",
                             color = TextSecondary,
                             fontSize = 12.sp
                         )
+                    }
+
+                    if (contextReloadRequired && !bench.isRunning) {
+                        Text("Context-Einstellungen geändert. Modell bitte neu laden; sonst würden falsche n_ubatch-Werte protokolliert.", color = ElectricAmber, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                     }
 
                     if (bench.isRunning) {
@@ -102,7 +108,7 @@ fun BenchmarkScreen(viewModel: LLMLabViewModel) {
                     } else {
                         Button(
                             onClick = { viewModel.run20xBenchmark() },
-                            enabled = isModelReady,
+                            enabled = isModelReady && !contextReloadRequired,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = NeonCyan,
                                 contentColor = Color.Black,

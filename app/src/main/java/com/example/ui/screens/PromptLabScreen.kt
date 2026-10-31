@@ -31,8 +31,11 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
     val activeTest by viewModel.labActiveTest.collectAsState()
     val testOutput by viewModel.labTestOutput.collectAsState()
     val labMetrics by viewModel.labMetrics.collectAsState()
+    val config by viewModel.config.collectAsState()
 
-    val isModelReady = modelState is ModelLifecycleState.Ready
+    val readyState = modelState as? ModelLifecycleState.Ready
+    val isModelReady = readyState != null && readyState.loadedConfig.hasSameNativeContext(config)
+    val contextReloadRequired = readyState != null && !isModelReady
     val isRunning = activeTest != null
 
     Column(
@@ -60,6 +63,10 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
             color = TextSecondary,
             fontSize = 12.sp
         )
+
+        if (contextReloadRequired) {
+            Text("Context-Parameter geändert. Bitte das Modell im Bereich Modell erneut laden, bevor Prompt-Tests gestartet werden.", color = ElectricAmber, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        }
 
         Spacer(modifier = Modifier.height(12.dp))
 

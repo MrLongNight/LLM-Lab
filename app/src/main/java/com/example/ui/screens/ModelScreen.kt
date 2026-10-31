@@ -217,7 +217,10 @@ fun ModelScreen(viewModel: LLMLabViewModel) {
 
                         Text("Engine: ${state.engineVersion}", color = TextSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                         Text("Initialisierungsdauer: ${state.initDurationMs} ms", color = TextPrimary, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
-                        Text("Aktive Inferenzparameter: n_ctx=${config.nCtx}, n_batch=${config.nBatch}, n_ubatch=${config.nUbatch}, threads=${config.nThreads}", color = TextSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        Text("Geladene Context-Parameter: n_ctx=${state.loadedConfig.nCtx}, n_batch=${state.loadedConfig.nBatch}, n_ubatch=${state.loadedConfig.nUbatch}, threads=${state.loadedConfig.nThreads}", color = TextSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        if (viewModel.requiresModelReload()) {
+                            Text("Einstellungen geändert: Diese Context-Werte sind noch nicht aktiv. Bitte das Modell erneut laden, bevor Chat, Prompt-Labor oder Benchmark verwendet werden.", color = ElectricAmber, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),

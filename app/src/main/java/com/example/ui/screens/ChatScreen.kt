@@ -30,12 +30,16 @@ import com.example.ui.theme.*
 fun ChatScreen(viewModel: LLMLabViewModel) {
     val modelState by viewModel.modelState.collectAsState()
     val chatMessages by viewModel.chatMessages.collectAsState()
+    val config by viewModel.config.collectAsState()
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 
     val isGenerating = modelState is ModelLifecycleState.InferenceRunning
     val isAborting = modelState is ModelLifecycleState.Aborting
-    val isModelReady = modelState is ModelLifecycleState.Ready
+    val readyState = modelState as? ModelLifecycleState.Ready
+    val isModelReady = readyState != null
+    val contextReloadRequired = readyState != null && !readyState.loadedConfig.hasSameNativeContext(config)
+    val canGenerate = isModelReady && !contextReloadRequired
 
     // Automatisch nach unten scrollen bei neuen Nachrichten
     LaunchedEffect(chatMessages.size, (modelState as? ModelLifecycleState.InferenceRunning)?.streamingText?.length) {
@@ -81,6 +85,7 @@ fun ChatScreen(viewModel: LLMLabViewModel) {
                         text = when {
                             isAborting -> "Nativer Abbruch läuft"
                             isGenerating -> "Inferenz aktiv"
+                            contextReloadRequired -> "Context-Änderung – Modell neu laden"
                             isModelReady -> "Modell bereit"
                             else -> "Kein Modell bereit"
                         },
@@ -100,6 +105,12 @@ fun ChatScreen(viewModel: LLMLabViewModel) {
                         tint = TextSecondary
                     )
                 }
+            }
+        }
+
+        if (contextReloadRequired) {
+            Surface(modifier = Modifier.fillMaxWidth(), color = DarkSurfaceVariant, border = androidx.compose.foundation.BorderStroke(1.dp, ElectricAmber.copy(alpha = 0.5f))) {
+                Text("n_ctx / n_batch / n_ubatch / Threads wurden geändert. Öffne Modell und tippe auf Erneut laden, bevor du weiter testest.", color = ElectricAmber, fontSize = 12.sp, modifier = Modifier.padding(12.dp))
             }
         }
 
@@ -183,7 +194,7 @@ fun ChatScreen(viewModel: LLMLabViewModel) {
                     onValueChange = { inputText = it },
                     placeholder = {
                         Text(
-                            text = if (isModelReady) "Prompt eingeben..." else "Zuerst Modell laden...",
+                            text = when { contextReloadRequired -> "Modell nach Parameteränderung neu laden..."; canGenerate -> "Prompt eingeben..."; else -> "Zuerst Modell laden..." },
                             color = TextMuted,
                             fontSize = 14.sp
                         )
@@ -191,7 +202,7 @@ fun ChatScreen(viewModel: LLMLabViewModel) {
                     modifier = Modifier
                         .weight(1f)
                         .testTag("chat_input_field"),
-                    enabled = isModelReady && !isGenerating,
+                    enabled = canGenerate && !isGenerating,
                     maxLines = 4,
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = TextPrimary,
@@ -223,17 +234,17 @@ fun ChatScreen(viewModel: LLMLabViewModel) {
                 } else {
                     IconButton(
                         onClick = {
-                            if (inputText.isNotBlank() && isModelReady) {
+                            if (inputText.isNotBlank() && canGenerate) {
                                 val text = inputText.trim()
                                 inputText = ""
                                 viewModel.sendChatMessage(text)
                             }
                         },
-                        enabled = isModelReady && inputText.isNotBlank(),
+                        enabled = canGenerate && inputText.isNotBlank(),
                         modifier = Modifier
                             .size(48.dp)
                             .background(
-                                if (isModelReady && inputText.isNotBlank()) NeonCyan else DarkSurfaceVariant,
+                                if (canGenerate && inputText.isNotBlank()) NeonCyan else DarkSurfaceVariant,
                                 RoundedCornerShape(12.dp)
                             )
                             .testTag("send_prompt_button")
@@ -241,7 +252,7 @@ fun ChatScreen(viewModel: LLMLabViewModel) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.Send,
                             contentDescription = "Prompt absenden",
-                            tint = if (isModelReady && inputText.isNotBlank()) Color.Black else TextMuted
+                            tint = if (canGenerate && inputText.isNotBlank()) Color.Black else TextMuted
                         )
                     }
                 }

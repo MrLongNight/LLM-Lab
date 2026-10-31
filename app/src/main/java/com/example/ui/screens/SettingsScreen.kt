@@ -27,6 +27,8 @@ import com.example.ui.theme.*
 @Composable
 fun SettingsScreen(viewModel: LLMLabViewModel) {
     val config by viewModel.config.collectAsState()
+    val modelState by viewModel.modelState.collectAsState()
+    val contextReloadRequired = (modelState as? ModelLifecycleState.Ready)?.loadedConfig?.hasSameNativeContext(config) == false
 
     Column(
         modifier = Modifier
@@ -55,6 +57,15 @@ fun SettingsScreen(viewModel: LLMLabViewModel) {
                 text = "Wähle vorkonfigurierte Profile oder justiere n_ubatch und Zeitlimits manuell.",
                 color = TextSecondary,
                 fontSize = 12.sp
+            )
+        }
+
+        if (contextReloadRequired) {
+            Text(
+                "Context-Parameter geändert: n_ctx, n_batch, n_ubatch oder Threads werden erst nach erneutem Laden des Modells wirksam.",
+                color = ElectricAmber,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
             )
         }
 
