@@ -103,6 +103,14 @@ Eingehende Rechnungen und Lieferscheine werden durch ein lokales On-Device-LLM a
             expectedKeywords = listOf("OK"),
             repetitionCount = 10,
             timeoutSec = 120
+        ),
+        PromptTestCase(
+            id = "TEST_8_SIMPLE_HALLOWEEN",
+            title = "8. Einfache Wissensfrage (Halloween)",
+            description = "Prüft eine kurze, konkrete deutsche Alltagsantwort ohne erfundene Selbstbeschreibung.",
+            prompt = "Was ist Halloween? Antworte auf Deutsch in genau zwei kurzen Sätzen und nenne das Datum.",
+            expectedKeywords = listOf("Halloween"),
+            timeoutSec = 45
         )
     )
 }

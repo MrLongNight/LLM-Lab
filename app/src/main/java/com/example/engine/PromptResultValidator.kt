@@ -34,6 +34,13 @@ object PromptResultValidator {
                 val json = parseJson(output)
                 result(json != null && json.has("iban") && json.opt("iban") === JSONObject.NULL && json.has("poNumber") && json.opt("poNumber") === JSONObject.NULL, "IBAN und poNumber müssen explizit JSON-null sein.")
             }
+            "TEST_8_SIMPLE_HALLOWEEN" -> {
+                val hasDate = output.contains("31. Oktober", ignoreCase = true) || output.contains("31.10")
+                val hasContext = listOf("Kostüm", "Verkleid", "Süßigkeit", "Grusel").any { output.contains(it, ignoreCase = true) }
+                val sentenceCount = Regex("[.!?](?:\\s|$)").findAll(output).count()
+                result(output.contains("Halloween", ignoreCase = true) && hasDate && hasContext && sentenceCount == 2,
+                    "Erwartet werden genau zwei kurze Sätze, das Datum 31. Oktober und ein typischer Brauch.")
+            }
             "TEST_6_LONG_CONTEXT" -> {
                 val keywords = testCase.expectedKeywords.all { output.contains(it, true) }
                 val bullets = Regex("(?m)^\\s*(?:[-*•]|\\d+[.)])\\s+\\S.*$").findAll(output).count()

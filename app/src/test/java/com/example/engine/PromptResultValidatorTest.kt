@@ -30,7 +30,14 @@ class PromptResultValidatorTest {
         assertFalse(PromptResultValidator.validate(test("TEST_5_HALLUCINATION"), """{"iban":"DE123","poNumber":null}""").passed)
     }
 
-    @Test fun longContextRequiresThreeBullets() {
+    @Test fun halloweenQuestionRequiresCorrectDateAndShortGermanAnswer() {
+        val good = "Halloween wird am 31. Oktober gefeiert. Viele Menschen verkleiden sich und Kinder sammeln Süßigkeiten."
+        val bad = "Halloween ist irgendwann im November. Es gibt Süßigkeiten."
+        assertTrue(PromptResultValidator.validate(test("TEST_8_SIMPLE_HALLOWEEN"), good).passed)
+        assertFalse(PromptResultValidator.validate(test("TEST_8_SIMPLE_HALLOWEEN"), bad).passed)
+    }
+
+    @Test fun longContextRequiresThreeBullets()
         val output = """
             - Aufbewahrung: zehn Jahre.
             - Zugriff: Rollen steuern Rechte.

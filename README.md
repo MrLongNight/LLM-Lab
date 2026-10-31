@@ -50,6 +50,8 @@ Der Prompt-Callback meldet Fortschritt während der Prompt-Auswertung. Während 
 
 Das Prompt-Labor prüft nicht nur, ob die native Engine beendet wurde, sondern wertet die tatsächliche Antwort aus: exaktes `OK`, zweisätzige deutsche Erklärung, JSON-Felder mit expliziten `null`-Werten, Briefextraktion inklusive Datum/Betrag, Halluzinationstest und drei Themenpunkte im Langtext. Der 10x-Test dokumentiert die einzelnen Antworten und deren Varianz.
 
+Der Standard-Samplingpfad verwendet Top-k=40, Top-p=0,90, Temperatur 0,25 und einen Wiederholungs-Guard; die Vokabularpuffer werden pro Inferenz wiederverwendet. Native llama.cpp-Kernel werden auch im Debug-APK mit `-O3` kompiliert.
+
 Der Stresstest führt bis zu 20 echte Inferenzläufe aus und wertet nur exakt passende `OK`-Antworten als inhaltlich erfolgreich. Timeout, nativer Fehler oder eine falsche Antwort beenden den Lauf automatisch.
 
 ## Abbruch- und Timeout-Verhalten
@@ -66,6 +68,7 @@ Vor Übergabe an `myDocAnizer-Mobile` sind auf dem tatsächlichen Smartphone min
 
 - [ ] Modellinitialisierung mit dem angegebenen Qwen-GGUF erfolgreich, Status erst danach `Modell bereit`.
 - [ ] Kurztest liefert tatsächlich exakt `OK`.
+- [ ] Der einfache Halloween-Wissenstest nennt korrekt den 31. Oktober und antwortet in zwei knappen Sätzen.
 - [ ] Deutscher Test, JSON-Test und Extraktion bestehen die inhaltliche Validierung.
 - [ ] Tokenisierung, Prompt-Eval und Generierung zeigen plausible native Messwerte.
 - [ ] Manueller Abbruch und jede Timeout-Klasse kehren innerhalb der festgelegten Grenzen zurück.

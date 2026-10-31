@@ -50,7 +50,7 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
             letterSpacing = 1.5.sp
         )
         Text(
-            text = "7 Standardisierte Testfälle",
+            text = "8 Standardisierte Testfälle",
             color = TextPrimary,
             fontSize = 20.sp,
             fontWeight = FontWeight.Bold
