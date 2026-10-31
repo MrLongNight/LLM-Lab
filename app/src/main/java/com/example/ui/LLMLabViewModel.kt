@@ -514,6 +514,13 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
         _chatMessages.value = _chatMessages.value + userMsg + assistantPlaceholder
 
         val currentConfig = _config.value
+        if (!readyState.loadedConfig.hasSameNativeContext(currentConfig)) {
+            _chatMessages.value = _chatMessages.value + ChatMessage(
+                isUser = false,
+                text = "Context-Parameter geändert. Bitte im Bereich Modell Erneut laden auswählen, bevor eine neue Inferenz startet."
+            )
+            return
+        }
         launchEngineOperation {
             var streamedResponse = StringBuilder()
             var tokenCounter = 0
@@ -661,6 +668,11 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
 
     fun runLabTest(testCase: PromptTestCase) {
         val readyState = _modelState.value as? ModelLifecycleState.Ready ?: return
+        val configForTest = _config.value
+        if (!readyState.loadedConfig.hasSameNativeContext(configForTest)) {
+            _labTestOutput.value = "Context-Parameter geändert. Bitte das Modell im Bereich Modell erneut laden, bevor ein Prompt-Test startet."
+            return
+        }
 
         launchEngineOperation {
             _labActiveTest.value = testCase
@@ -668,7 +680,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             _labMetrics.value = null
 
             val timeoutSeconds = if (testCase.id == "TEST_1_OK") {
-                _config.value.timeoutShortTestSec
+                configForTest.timeoutShortTestSec
             } else {
                 testCase.timeoutSec
             }
@@ -702,7 +714,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
 
                 val metrics = executeInferenceWithWatchdog(
                     prompt = testCase.prompt,
-                    config = _config.value,
+                    config = configForTest,
                     callback = callback,
                     timeoutSeconds = timeoutSeconds
                 )
@@ -732,10 +744,10 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     generationDurationMs = metrics.generationDurationMs,
                     tokensPerSecond = metrics.tokensPerSecond,
                     totalDurationMs = metrics.totalDurationMs,
-                    nCtx = _config.value.nCtx,
-                    nBatch = _config.value.nBatch,
-                    nUbatch = _config.value.nUbatch,
-                    nThreads = _config.value.nThreads,
+                    nCtx = configForTest.nCtx,
+                    nBatch = configForTest.nBatch,
+                    nUbatch = configForTest.nUbatch,
+                    nThreads = configForTest.nThreads,
                     finishReason = metrics.finishReason,
                     isSuccess = runSucceeded,
                     errorMessage = runError,
@@ -803,10 +815,16 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
 
     fun run20xBenchmark() {
         val readyState = _modelState.value as? ModelLifecycleState.Ready ?: return
+        val config = _config.value
+        if (!readyState.loadedConfig.hasSameNativeContext(config)) {
+            _benchmarkSummary.value = BenchmarkSummary(
+                stopReason = "Context-Parameter geändert. Bitte das Modell neu laden, bevor der Benchmark startet."
+            )
+            return
+        }
 
         launchEngineOperation {
             val prompt = "Antworte ausschließlich mit OK."
-            val config = _config.value
             val durations = mutableListOf<Long>()
             var successfulRuns = 0
             var failedRuns = 0
