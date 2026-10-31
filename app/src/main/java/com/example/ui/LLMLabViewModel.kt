@@ -727,9 +727,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 val validation = PromptResultValidator.validate(testCase, response)
                 outcomes.add(Triple(repetition, response, validation))
                 val runSucceeded = inferenceCompleted && validation.passed
-                val runError = metrics.errorMessage ?: if (inferenceCompleted && !validation.passed) {
-                    "Inhaltliche Prüfung fehlgeschlagen: ${validation.details}"
-                } else null
+                val runError = PromptResultValidator.failureReason(metrics.errorMessage, inferenceCompleted, validation)
 
                 dao.insertRun(TestRunEntity(
                     testCategory = testCase.id,

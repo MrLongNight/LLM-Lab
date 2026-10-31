@@ -32,6 +32,7 @@ object ExportManager {
 
         root.put("exportTimestamp", nowStr)
         root.put("appVersion", BuildConfig.VERSION_NAME)
+        root.put("buildCommit", BuildConfig.GIT_COMMIT)
         root.put("modelStatus", modelStatus)
         root.put("androidVersion", "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
         root.put("deviceModel", "${Build.MANUFACTURER} ${Build.MODEL}")
@@ -124,6 +125,7 @@ object ExportManager {
         sb.appendLine("================================================================================")
         sb.appendLine("Erstellungszeitpunkt : $nowStr")
         sb.appendLine("App-Version          : ${BuildConfig.VERSION_NAME} (Mobile Inference Testbench)")
+        sb.appendLine("Build-Commit         : ${BuildConfig.GIT_COMMIT}")
         sb.appendLine("Modellstatus         : $modelStatus")
         sb.appendLine("Android-Version      : Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
         sb.appendLine("Gerät / Hardware     : ${Build.MANUFACTURER} ${Build.MODEL} (${telemetry.cpuArch}, ${telemetry.cpuCores} Kerne)")

@@ -83,7 +83,7 @@ Eingehende Rechnungen und Lieferscheine werden durch ein lokales On-Device-LLM a
             id = "TEST_5_HALLUCINATION",
             title = "5. Halluzinationstest (Null-Regel)",
             description = "Verlangt 'null' für nicht im Text vorhandene Daten wie 'iban' und 'poNumber'.",
-            prompt = "Lies folgenden Text:\n$sampleLetterText\n\nErzeuge ausschließlich ein valides JSON-Objekt mit exakt den Feldern iban und poNumber. Wenn eine Information im Text nicht vorhanden ist, MUSS der Wert zwingend JSON-null sein.",
+            prompt = "Lies folgenden Text:\n$sampleLetterText\n\nErzeuge ausschließlich ein valides JSON-Objekt mit exakt den Feldern iban und poNumber. iban ist nur eine IBAN. poNumber ist ausschließlich eine ausdrücklich genannte Bestellnummer, PO-Nummer oder Purchase-Order-Nummer. Eine Rechnungsnummer (hier: 2026-9812) ist KEINE Bestellnummer und darf niemals als poNumber übernommen werden. Da der Text keine IBAN und keine Bestellnummer enthält, müssen beide Werte exakt JSON-null sein.",
             expectedKeywords = listOf("null"),
             timeoutSec = 60
         ),

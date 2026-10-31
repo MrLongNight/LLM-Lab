@@ -11,8 +11,9 @@ android {
     applicationId = "de.mrlongnight.llmlab"
     minSdk = 29
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = 2
+    versionName = "1.1"
+    buildConfigField("String", "GIT_COMMIT", "\"${System.getenv("GITHUB_SHA") ?: "local"}\"")
     ndk { abiFilters.add("arm64-v8a") }
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

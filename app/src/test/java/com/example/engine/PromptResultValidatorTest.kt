@@ -11,6 +11,15 @@ class PromptResultValidatorTest {
     private fun test(id: String) = PromptTestCatalog.ALL_TESTS.first { it.id == id }
 
     @Test
+    fun blankNativeErrorDoesNotHideContentValidationFailure() {
+        val failed = PromptValidationResult(false, "Erwartet wurden zwei Sätze.")
+        assertTrue(PromptResultValidator.failureReason("", true, failed)!!.contains("zwei Sätze"))
+        assertTrue(PromptResultValidator.failureReason(null, true, failed)!!.contains("zwei Sätze"))
+        assertTrue(PromptResultValidator.failureReason("Native decode failed", true, failed) == "Native decode failed")
+        assertTrue(PromptResultValidator.failureReason("", true, PromptValidationResult(true, "OK")) == null)
+    }
+
+    @Test
     fun shortTestOnlyAcceptsExactOk() {
         assertTrue(PromptResultValidator.validate(test("TEST_1_OK"), "OK").passed)
         assertFalse(PromptResultValidator.validate(test("TEST_1_OK"), "OK, gern.").passed)

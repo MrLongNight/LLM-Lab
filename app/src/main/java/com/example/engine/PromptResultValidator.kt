@@ -5,6 +5,11 @@ import org.json.JSONObject
 data class PromptValidationResult(val passed: Boolean, val details: String)
 
 object PromptResultValidator {
+    fun failureReason(nativeError: String?, inferenceCompleted: Boolean, validation: PromptValidationResult): String? {
+        nativeError?.takeIf { it.isNotBlank() }?.let { return it }
+        return if (inferenceCompleted && !validation.passed) "Inhaltliche Prüfung fehlgeschlagen: ${validation.details}" else null
+    }
+
     fun validate(testCase: PromptTestCase, rawOutput: String): PromptValidationResult {
         val output = rawOutput.trim()
         if (output.isEmpty()) return PromptValidationResult(false, "Das Modell hat keinen Antworttext erzeugt.")
