@@ -64,9 +64,10 @@ if(ANDROID AND (NOT DEFINED SPIRV-Headers_DIR OR "${SPIRV-Headers_DIR}" MATCHES 
     endif()
 endif()
 
-# Android's NDK does not ship Vulkan-Hpp. The host libvulkan-dev package
-# provides these header-only bindings. Stage only Vulkan headers (not /usr/include)
-# into an isolated include root so host libc headers cannot shadow the Android NDK.
+# The Android NDK does not ship Vulkan-Hpp or SPIR-V C++ headers. Ubuntu's
+# libvulkan-dev and spirv-headers provide these header-only dependencies.
+# Stage only those headers into an isolated include root; never expose all of
+# host /usr/include to the Android cross-compiler or link host Vulkan libraries.
 if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android")
     find_path(LLMLAB_VULKAN_HOST_INCLUDE_DIR
         NAMES vulkan/vulkan.hpp
@@ -75,19 +76,32 @@ if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android")
         NO_CMAKE_FIND_ROOT_PATH
     )
     if(NOT LLMLAB_VULKAN_HOST_INCLUDE_DIR)
-        message(FATAL_ERROR "Vulkan-Hpp headers not found. Install the host libvulkan-dev package.")
+        message(FATAL_ERROR "Vulkan-Hpp headers not found. Install host libvulkan-dev.")
+    endif()
+    find_path(LLMLAB_SPIRV_HOST_INCLUDE_DIR
+        NAMES spirv/unified1/spirv.hpp
+        PATHS /usr/include /usr/local/include
+        NO_DEFAULT_PATH
+        NO_CMAKE_FIND_ROOT_PATH
+    )
+    if(NOT LLMLAB_SPIRV_HOST_INCLUDE_DIR)
+        message(FATAL_ERROR "SPIR-V headers not found. Install host spirv-headers.")
     endif()
     set(LLMLAB_VULKAN_STAGED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/llmlab-vulkan-host-headers")
     file(MAKE_DIRECTORY "${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}")
     file(COPY "${LLMLAB_VULKAN_HOST_INCLUDE_DIR}/vulkan" DESTINATION "${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}")
+    file(COPY "${LLMLAB_SPIRV_HOST_INCLUDE_DIR}/spirv" DESTINATION "${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}")
     if(EXISTS "${LLMLAB_VULKAN_HOST_INCLUDE_DIR}/vk_video")
         file(COPY "${LLMLAB_VULKAN_HOST_INCLUDE_DIR}/vk_video" DESTINATION "${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}")
     endif()
-    if(NOT EXISTS "${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}/vulkan/vulkan.hpp")
-        message(FATAL_ERROR "Failed to stage Vulkan-Hpp headers for the Android build.")
+    if(NOT EXISTS "${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}/vulkan/vulkan.hpp" OR
+       NOT EXISTS "${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}/spirv/unified1/spirv.hpp")
+        message(FATAL_ERROR "Failed to stage Vulkan-Hpp/SPIR-V headers for the Android build.")
     endif()
-    include_directories(SYSTEM BEFORE "${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}")
-    message(STATUS "LLM Lab: staged Vulkan-Hpp headers for Android at ${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}")
+    # CMake syntax is BEFORE SYSTEM, not SYSTEM BEFORE; the latter adds a
+    # literal include directory named BEFORE and silently omits our headers.
+    include_directories(BEFORE SYSTEM "${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}")
+    message(STATUS "LLM Lab: staged Vulkan-Hpp and SPIR-V headers at ${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}")
 endif()
 
 add_subdirectory("${LLAMA_CPP_SOURCE}" "${CMAKE_BINARY_DIR}/llama.cpp" EXCLUDE_FROM_ALL)
