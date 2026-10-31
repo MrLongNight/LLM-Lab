@@ -38,6 +38,19 @@ class LlamaNativeBridge {
         }
     }
 
+    fun getBackendInfo(): List<NativeBackendInfo> {
+        if (!isNativeLibraryLoaded || engineHandle == 0L) return emptyList()
+        return runCatching { NativeBackendInfo.parseReport(nativeGetBackendReport()) }
+            .onFailure { Log.w(TAG, "Backend-Erkennung fehlgeschlagen: ${it.message}") }
+            .getOrDefault(emptyList())
+    }
+
+    fun getActiveBackendName(): String {
+        if (!isNativeLibraryLoaded || engineHandle == 0L) return "Native Engine nicht verfügbar"
+        return runCatching { nativeGetActiveBackendName(engineHandle) }
+            .getOrDefault("Nicht verfügbar")
+    }
+
     fun getEngineVersion(): String {
         if (!isNativeLibraryLoaded || engineHandle == 0L) {
             return "Nicht verfügbar: native llama.cpp Bibliothek wurde nicht geladen"
@@ -84,6 +97,8 @@ class LlamaNativeBridge {
                 config.nBatch,
                 config.nUbatch,
                 config.nThreads,
+                config.nThreadsBatch,
+                config.backendPreference.nativeCode,
                 outError
             )
         } catch (t: Throwable) {
@@ -136,7 +151,10 @@ class LlamaNativeBridge {
                 config.nBatch,
                 config.nUbatch,
                 config.nThreads,
+                config.nThreadsBatch,
                 config.temperature,
+                config.topK,
+                config.topP,
                 config.maxTokens,
                 callback
             ) ?: unavailableMetrics("JNI lieferte kein NativeMetrics-Objekt")
@@ -180,6 +198,8 @@ class LlamaNativeBridge {
         }
     }
 
+    private external fun nativeGetBackendReport(): String
+    private external fun nativeGetActiveBackendName(handle: Long): String
     private external fun nativeGetVersion(): String
     private external fun nativeCreateEngine(): Long
     private external fun nativeDestroyEngine(handle: Long)
@@ -190,6 +210,8 @@ class LlamaNativeBridge {
         nBatch: Int,
         nUbatch: Int,
         nThreads: Int,
+        nThreadsBatch: Int,
+        backendPreference: Int,
         outError: Array<String?>
     ): Boolean
     private external fun nativeUnloadModel(handle: Long)
@@ -202,7 +224,10 @@ class LlamaNativeBridge {
         nBatch: Int,
         nUbatch: Int,
         nThreads: Int,
+        nThreadsBatch: Int,
         temperature: Float,
+        topK: Int,
+        topP: Float,
         maxTokens: Int,
         callback: InferenceCallback
     ): NativeMetrics

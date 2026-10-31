@@ -43,6 +43,11 @@ jobs:
             keytool -genkey -v -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=LLM Lab Standalone,O=MrLongNight,C=DE"
           fi
 
+      - name: Install Vulkan shader compiler and headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslc libvulkan-dev
+
       - name: Accept Android SDK Licenses and Install NDK/CMake
         shell: bash
         run: |

@@ -17,8 +17,12 @@ struct NativeInferenceConfig {
     int n_batch = 512;
     int n_ubatch = 8;
     int n_threads = 4;
-    float temperature = 0.25f;
-    int max_tokens = 512;
+    int n_threads_batch = 8;
+    int backend_preference = 0;
+    float temperature = 0.2f;
+    int top_k = 20;
+    float top_p = 0.8f;
+    int max_tokens = 160;
 };
 
 struct NativeGenerationMetrics {
@@ -60,6 +64,7 @@ public:
     );
 
     int64_t getNativeAllocatedHeap() const;
+    std::string getActiveBackendName() const;
 
 private:
     static bool modelLoadProgress(float progress, void* userData);
@@ -73,6 +78,8 @@ private:
     llama_context* llama_ctx_ptr = nullptr;
     std::string loaded_model_path;
     std::string loaded_model_architecture;
+    std::string active_backend_name = "CPU";
+    int active_gpu_layers_requested = 0;
     NativeInferenceConfig active_config;
 };
 

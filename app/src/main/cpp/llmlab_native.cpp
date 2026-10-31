@@ -8,6 +8,8 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <sstream>
+#include <cctype>
 #include <string>
 #include <string_view>
 #include <cstdint>
@@ -133,6 +135,97 @@ jstring newJavaStringFromUtf8(JNIEnv* env, std::string_view value) {
         static_cast<jsize>(utf16.size()));
 }
 
+
+std::string jsonEscape(const std::string& value) {
+    std::ostringstream out;
+    for (unsigned char c : value) {
+        switch (c) {
+            case '"': out << "\\\""; break;
+            case '\\': out << "\\\\"; break;
+            case '\b': out << "\\b"; break;
+            case '\f': out << "\\f"; break;
+            case '\n': out << "\\n"; break;
+            case '\r': out << "\\r"; break;
+            case '\t': out << "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    const char hex[] = "0123456789abcdef";
+                    out << "\\u00" << hex[(c >> 4) & 0xF] << hex[c & 0xF];
+                } else out << static_cast<char>(c);
+        }
+    }
+    return out.str();
+}
+
+std::string lowercaseAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+std::string backendKind(const std::string& registryName) {
+    const std::string name = lowercaseAscii(registryName);
+    if (name == "cpu" || name.find("cpu") != std::string::npos) return "CPU";
+    if (name.find("hexagon") != std::string::npos ||
+        name.find("qnn") != std::string::npos ||
+        name.find("cann") != std::string::npos ||
+        name.find("enn") != std::string::npos ||
+        name.find("npu") != std::string::npos) return "NPU/ACCELERATOR";
+    if (name == "rpc" || name.find("rpc") != std::string::npos) return "REMOTE";
+    return "GPU/ACCELERATOR";
+}
+
+bool initializeRuntimeBackend(size_t index, std::string& runtimeName, std::string& bufferType) {
+    ggml_backend_t backend = ggml_backend_reg_init_backend(index, nullptr);
+    if (backend == nullptr) return false;
+    const char* name = ggml_backend_name(backend);
+    runtimeName = name != nullptr ? name : "";
+    ggml_backend_buffer_type_t buffer = ggml_backend_get_default_buffer_type(backend);
+    const char* bufferName = buffer != nullptr ? ggml_backend_buft_name(buffer) : nullptr;
+    bufferType = bufferName != nullptr ? bufferName : "";
+    ggml_backend_free(backend);
+    return true;
+}
+
+std::string backendRegistryReportJson() {
+    std::ostringstream out;
+    out << "[";
+    bool first = true;
+    const size_t count = ggml_backend_reg_get_count();
+    for (size_t i = 0; i < count; ++i) {
+        const char* rawName = ggml_backend_reg_get_name(i);
+        const std::string registryName = rawName != nullptr ? rawName : "Unknown";
+        std::string runtimeName;
+        std::string bufferType;
+        const bool available = initializeRuntimeBackend(i, runtimeName, bufferType);
+        if (!first) out << ",";
+        first = false;
+        out << "{"
+            << "\"registryName\":\"" << jsonEscape(registryName) << "\","
+            << "\"runtimeName\":\"" << jsonEscape(runtimeName) << "\","
+            << "\"kind\":\"" << jsonEscape(backendKind(registryName)) << "\","
+            << "\"bufferType\":\"" << jsonEscape(bufferType) << "\","
+            << "\"available\":" << (available ? "true" : "false")
+            << "}";
+    }
+    out << "]";
+    return out.str();
+}
+
+std::string firstAvailableAcceleratorBackend() {
+    const size_t count = ggml_backend_reg_get_count();
+    for (size_t i = 0; i < count; ++i) {
+        const char* rawName = ggml_backend_reg_get_name(i);
+        const std::string registryName = rawName != nullptr ? rawName : "";
+        const std::string kind = backendKind(registryName);
+        if (kind == "CPU" || kind == "REMOTE") continue;
+        std::string runtimeName;
+        std::string bufferType;
+        if (initializeRuntimeBackend(i, runtimeName, bufferType)) return runtimeName.empty() ? registryName : runtimeName;
+    }
+    return "";
+}
+
 void setNativeError(NativeGenerationMetrics& metrics, const std::string& message) {
     metrics.finish_reason = "NATIVE_ERROR";
     metrics.error_message = message;
@@ -175,6 +268,8 @@ void NativeLlamaEngine::clearModelLocked() {
     }
     loaded_model_path.clear();
     loaded_model_architecture.clear();
+    active_backend_name = "CPU";
+    active_gpu_layers_requested = 0;
 }
 
 bool NativeLlamaEngine::loadModel(
@@ -191,25 +286,41 @@ bool NativeLlamaEngine::loadModel(
     }
 
     active_config = config;
+    const std::string acceleratorBackend = firstAvailableAcceleratorBackend();
+    const bool acceleratorAvailable = !acceleratorBackend.empty();
+    const bool acceleratorRequired = config.backend_preference == 2;
+    if (acceleratorRequired && !acceleratorAvailable) {
+        outError = "Es wurde kein initialisierbares GPU-/Accelerator-Backend gefunden. CPU-Fallback ist bei dieser Einstellung absichtlich deaktiviert.";
+        return false;
+    }
 
-    llama_model_params modelParams = llama_model_default_params();
-    modelParams.n_gpu_layers = 0; // Explizit CPU-only für reproduzierbare Gerätetests.
-    modelParams.progress_callback = &NativeLlamaEngine::modelLoadProgress;
-    modelParams.progress_callback_user_data = this;
+    int requestedGpuLayers = (config.backend_preference != 1 && acceleratorAvailable) ? 999 : 0;
+    auto makeModelParams = [&](int gpuLayers) {
+        llama_model_params params = llama_model_default_params();
+        params.n_gpu_layers = gpuLayers;
+        params.progress_callback = &NativeLlamaEngine::modelLoadProgress;
+        params.progress_callback_user_data = this;
+        return params;
+    };
 
-    LOGI("Lade GGUF mit llama.cpp %s (%s), n_ctx=%d, n_batch=%d, n_ubatch=%d, threads=%d",
-         LLAMACPP_TARGET_VERSION,
-         LLAMACPP_COMMIT_HASH,
-         config.n_ctx,
-         config.n_batch,
-         config.n_ubatch,
-         config.n_threads);
+    LOGI("Lade GGUF mit llama.cpp %s (%s), n_ctx=%d, n_batch=%d, n_ubatch=%d, threads=%d, batch_threads=%d, backend_policy=%d, gpu_layers=%d",
+         LLAMACPP_TARGET_VERSION, LLAMACPP_COMMIT_HASH, config.n_ctx, config.n_batch,
+         config.n_ubatch, config.n_threads, config.n_threads_batch,
+         config.backend_preference, requestedGpuLayers);
 
+    llama_model_params modelParams = makeModelParams(requestedGpuLayers);
     llama_model* model = llama_load_model_from_file(path.c_str(), modelParams);
+    if (model == nullptr && requestedGpuLayers > 0 && config.backend_preference == 0 && !isAbortRequested()) {
+        LOGW("Accelerator-Modellinitialisierung fehlgeschlagen; AUTO versucht einmal den CPU-Fallback");
+        requestedGpuLayers = 0;
+        modelParams = makeModelParams(0);
+        model = llama_load_model_from_file(path.c_str(), modelParams);
+    }
+
     if (model == nullptr) {
         outError = isAbortRequested()
             ? "Modellladen durch Nutzer oder Timeout abgebrochen"
-            : "llama_load_model_from_file fehlgeschlagen. GGUF-Datei, Modellkompatibilität und verfügbaren RAM prüfen.";
+            : "llama_load_model_from_file fehlgeschlagen. GGUF-Datei, Backend-Kompatibilität und verfügbaren RAM prüfen.";
         LOGE("%s", outError.c_str());
         return false;
     }
@@ -225,10 +336,10 @@ bool NativeLlamaEngine::loadModel(
     contextParams.n_batch = static_cast<uint32_t>(std::max(1, config.n_batch));
     contextParams.n_ubatch = static_cast<uint32_t>(std::max(1, std::min(config.n_ubatch, config.n_batch)));
     contextParams.n_threads = static_cast<uint32_t>(std::max(1, config.n_threads));
-    contextParams.n_threads_batch = static_cast<uint32_t>(std::max(1, config.n_threads));
+    contextParams.n_threads_batch = static_cast<uint32_t>(std::max(1, config.n_threads_batch));
     contextParams.n_seq_max = 1;
     contextParams.seed = 42;
-    contextParams.offload_kqv = false;
+    contextParams.offload_kqv = requestedGpuLayers > 0;
     contextParams.abort_callback = &NativeLlamaEngine::abortCallback;
     contextParams.abort_callback_data = this;
 
@@ -237,7 +348,7 @@ bool NativeLlamaEngine::loadModel(
         llama_free_model(model);
         outError = isAbortRequested()
             ? "Context-Initialisierung abgebrochen"
-            : "llama_new_context_with_model fehlgeschlagen. Context-Größe oder Arbeitsspeicher prüfen.";
+            : "llama_new_context_with_model fehlgeschlagen. Context-Größe, Backend oder Arbeitsspeicher prüfen.";
         LOGE("%s", outError.c_str());
         return false;
     }
@@ -252,6 +363,8 @@ bool NativeLlamaEngine::loadModel(
     llama_model_ptr = model;
     llama_ctx_ptr = context;
     loaded_model_path = path;
+    active_gpu_layers_requested = requestedGpuLayers;
+    active_backend_name = requestedGpuLayers > 0 ? acceleratorBackend : "CPU";
     is_model_loaded.store(true);
 
     char modelDescription[256] = {};
@@ -265,8 +378,10 @@ bool NativeLlamaEngine::loadModel(
         model, "tokenizer.chat_template", templateMetadata, sizeof(templateMetadata));
     LOGI("GGUF architecture=%s | chat_template_metadata=%s (%d bytes)",
          loaded_model_architecture.empty() ? "unavailable" : loaded_model_architecture.c_str(),
-         templateMetadataLength > 0 ? "present" : "missing/truncated",
-         templateMetadataLength);
+         templateMetadataLength > 0 ? "present" : "missing/truncated", templateMetadataLength);
+    LOGI("Backend-Auswahl=%s, n_gpu_layers_requested=%d, offload_kqv=%s. Die tatsächliche Layerzahl steht im llama.cpp Modelllade-Log.",
+         active_backend_name.c_str(), active_gpu_layers_requested,
+         contextParams.offload_kqv ? "true" : "false");
     LOGI("Modell vollständig geladen: %s | params=%llu | weights=%llu bytes | n_ctx=%u",
          modelDescription,
          static_cast<unsigned long long>(llama_model_n_params(model)),
@@ -299,6 +414,15 @@ void NativeLlamaEngine::resetAbort() {
     // never clear the abort signal while a previous native call is still running.
     std::lock_guard<std::mutex> lock(engine_mutex);
     abort_flag.store(false);
+}
+
+std::string NativeLlamaEngine::getActiveBackendName() const {
+    std::lock_guard<std::mutex> lock(engine_mutex);
+    if (!is_model_loaded.load()) return "Kein Modell geladen";
+    if (active_gpu_layers_requested > 0) {
+        return active_backend_name + " (GPU-Layer-Offload angefordert; tatsächliche Layerzahl siehe llama.cpp-Load-Log)";
+    }
+    return "CPU";
 }
 
 int64_t NativeLlamaEngine::getNativeAllocatedHeap() const {
@@ -551,7 +675,7 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
 
     // Do not penalize the user's prompt tokens. On small instruction models this
     // can suppress key nouns from the question and degrade simple factual answers.
-    LOGI("Sampler: temperature=%.2f top_k=20 top_p=0.80 repeat_penalty=1.00", config.temperature);
+    LOGI("Sampler: temperature=%.2f top_k=%d top_p=%.2f repeat_penalty=1.00", config.temperature, config.top_k, config.top_p);
     for (int32_t generated = 0; generated < maxTokens; ++generated) {
         if (isAbortRequested()) {
             metrics.finish_reason = "ABORTED_BY_USER";
@@ -577,8 +701,8 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
         if (config.temperature <= 0.0f) {
             sampledToken = llama_sample_token_greedy(llama_ctx_ptr, &candidatesArray);
         } else {
-            llama_sample_top_k(llama_ctx_ptr, &candidatesArray, 20, 1);
-            llama_sample_top_p(llama_ctx_ptr, &candidatesArray, 0.80f, 1);
+            llama_sample_top_k(llama_ctx_ptr, &candidatesArray, config.top_k, 1);
+            llama_sample_top_p(llama_ctx_ptr, &candidatesArray, config.top_p, 1);
             llama_sample_temp(llama_ctx_ptr, &candidatesArray, config.temperature);
             llama_sample_softmax(llama_ctx_ptr, &candidatesArray);
             sampledToken = llama_sample_token(llama_ctx_ptr, &candidatesArray);
@@ -690,8 +814,20 @@ extern "C" {
 JNIEXPORT jstring JNICALL
 Java_com_example_engine_LlamaNativeBridge_nativeGetVersion(JNIEnv* env, jobject /* this */) {
     const std::string version = std::string("llama.cpp ") + LLAMACPP_TARGET_VERSION +
-                                " (" + LLAMACPP_COMMIT_HASH + "), CPU backend, optimized -O3";
+                                " (" + LLAMACPP_COMMIT_HASH + "), runtime backend registry, optimized -O3";
     return env->NewStringUTF(version.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_example_engine_LlamaNativeBridge_nativeGetBackendReport(JNIEnv* env, jobject /* this */) {
+    std::call_once(g_backend_init_once, []() { llama_backend_init(); });
+    return newJavaStringFromUtf8(env, backendRegistryReportJson());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_example_engine_LlamaNativeBridge_nativeGetActiveBackendName(JNIEnv* env, jobject /* this */, jlong handle) {
+    if (handle == 0) return newJavaStringFromUtf8(env, "Native Engine nicht verfügbar");
+    return newJavaStringFromUtf8(env, reinterpret_cast<NativeLlamaEngine*>(handle)->getActiveBackendName());
 }
 
 JNIEXPORT jlong JNICALL
@@ -717,6 +853,8 @@ Java_com_example_engine_LlamaNativeBridge_nativeLoadModel(
     jint nBatch,
     jint nUbatch,
     jint nThreads,
+    jint nThreadsBatch,
+    jint backendPreference,
     jobjectArray outErrorArray
 ) {
     if (handle == 0 || jPath == nullptr) return JNI_FALSE;
@@ -732,6 +870,8 @@ Java_com_example_engine_LlamaNativeBridge_nativeLoadModel(
     config.n_batch = nBatch;
     config.n_ubatch = nUbatch;
     config.n_threads = nThreads;
+    config.n_threads_batch = nThreadsBatch;
+    config.backend_preference = backendPreference;
 
     std::string error;
     const bool ok = engine->loadModel(path, config, error);
@@ -776,7 +916,10 @@ Java_com_example_engine_LlamaNativeBridge_nativeExecuteInference(
     jint nBatch,
     jint nUbatch,
     jint nThreads,
+    jint nThreadsBatch,
     jfloat temperature,
+    jint topK,
+    jfloat topP,
     jint maxTokens,
     jobject callbackObj
 ) {
@@ -793,7 +936,10 @@ Java_com_example_engine_LlamaNativeBridge_nativeExecuteInference(
     config.n_batch = nBatch;
     config.n_ubatch = nUbatch;
     config.n_threads = nThreads;
+    config.n_threads_batch = nThreadsBatch;
     config.temperature = temperature;
+    config.top_k = std::max(1, topK);
+    config.top_p = std::clamp(topP, 0.01f, 1.0f);
     config.max_tokens = maxTokens;
 
     jclass callbackClass = callbackObj != nullptr ? env->GetObjectClass(callbackObj) : nullptr;

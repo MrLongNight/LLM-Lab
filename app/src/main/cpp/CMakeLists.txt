@@ -5,7 +5,10 @@ project("llmlab_native" LANGUAGES C CXX)
 # This directory-level option is inherited by the pinned llama.cpp subproject.
 add_compile_options(-O3 -DNDEBUG)
 
-# llama.cpp is pinned as a Git submodule. Only its CPU backend is built.
+# llama.cpp is pinned as a Git submodule. CPU is always built; Vulkan is
+# optional and is used only when an Android device exposes a working GPU backend.
+option(LLMLAB_ENABLE_VULKAN "Build the generic Vulkan GPU backend" ON)
+
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -19,7 +22,7 @@ set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
 set(GGML_BLAS OFF CACHE BOOL "" FORCE)
 set(GGML_CUDA OFF CACHE BOOL "" FORCE)
 set(GGML_HIPBLAS OFF CACHE BOOL "" FORCE)
-set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+set(GGML_VULKAN ${LLMLAB_ENABLE_VULKAN} CACHE BOOL "" FORCE)
 set(GGML_METAL OFF CACHE BOOL "" FORCE)
 set(GGML_RPC OFF CACHE BOOL "" FORCE)
 set(GGML_KOMPUTE OFF CACHE BOOL "" FORCE)
