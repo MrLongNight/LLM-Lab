@@ -134,6 +134,9 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     private val _benchmarkSummary = MutableStateFlow(BenchmarkSummary())
     val benchmarkSummary: StateFlow<BenchmarkSummary> = _benchmarkSummary.asStateFlow()
 
+    private val _exportStatus = MutableStateFlow<String?>(null)
+    val exportStatus: StateFlow<String?> = _exportStatus.asStateFlow()
+
     val testRunHistory = dao.getAllRuns().stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5000),
@@ -911,45 +914,47 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     fun exportReport(asJson: Boolean) {
         viewModelScope.launch(Dispatchers.IO) {
             val context = getApplication<Application>()
-            val runs = testRunHistory.value
-            val engineVer = nativeBridge.getEngineVersion()
-            val state = _modelState.value
-            val selectedModel = when (state) {
-                is ModelLifecycleState.Ready -> Triple(state.fileName, state.fileSizeBytes, state.ggufInfo)
-                is ModelLifecycleState.ModelSelected -> Triple(state.fileName, state.fileSizeBytes, state.ggufInfo)
-                else -> lastModelSelection?.let { Triple(it.fileName, it.fileSizeBytes, it.ggufInfo) }
-            }
-            val modelName = selectedModel?.first ?: "Nicht geladen"
-            val modelSizeBytes = selectedModel?.second ?: 0L
-            val modelSize = if (modelSizeBytes > 0L) "${modelSizeBytes / (1024 * 1024)} MB" else "Nicht verfügbar"
-            val modelInfo = selectedModel?.third
-            val modelStatus = when (state) {
-                is ModelLifecycleState.Ready -> "READY"
-                is ModelLifecycleState.ModelSelected -> "SELECTED_NOT_LOADED"
-                is ModelLifecycleState.Initializing -> "INITIALIZING"
-                is ModelLifecycleState.InferenceRunning -> "INFERENCE_RUNNING"
-                ModelLifecycleState.Aborting -> "ABORTING"
-                is ModelLifecycleState.Error -> "ERROR"
-                else -> "NOT_LOADED"
-            }
-
-            if (asJson) {
-                val json = ExportManager.generateJson(
-                    context = context, runs = runs, config = _config.value, telemetry = _telemetry.value,
-                    engineVersion = engineVer, modelName = modelName, modelSizeFormatted = modelSize,
-                    modelInfo = modelInfo, modelStatus = modelStatus
-                )
-                withContext(Dispatchers.Main) {
-                    ExportManager.shareExport(context, json, "llmlab_diagnose_${System.currentTimeMillis()}.json", "application/json")
+            _exportStatus.value = "Diagnoseexport wird vorbereitet..."
+            try {
+                val runs = testRunHistory.value
+                val engineVer = nativeBridge.getEngineVersion()
+                val state = _modelState.value
+                val selectedModel = when (state) {
+                    is ModelLifecycleState.Ready -> Triple(state.fileName, state.fileSizeBytes, state.ggufInfo)
+                    is ModelLifecycleState.ModelSelected -> Triple(state.fileName, state.fileSizeBytes, state.ggufInfo)
+                    else -> lastModelSelection?.let { Triple(it.fileName, it.fileSizeBytes, it.ggufInfo) }
                 }
-            } else {
-                val txt = ExportManager.generateTxt(
-                    context = context, runs = runs, config = _config.value, telemetry = _telemetry.value,
-                    engineVersion = engineVer, modelName = modelName, modelSizeFormatted = modelSize,
-                    modelInfo = modelInfo, modelStatus = modelStatus
-                )
+                val modelName = selectedModel?.first ?: "Nicht geladen"
+                val modelSizeBytes = selectedModel?.second ?: 0L
+                val modelSize = if (modelSizeBytes > 0L) "${modelSizeBytes / (1024 * 1024)} MB" else "Nicht verfügbar"
+                val modelInfo = selectedModel?.third
+                val modelStatus = when (state) {
+                    is ModelLifecycleState.Ready -> "READY"
+                    is ModelLifecycleState.ModelSelected -> "SELECTED_NOT_LOADED"
+                    is ModelLifecycleState.Initializing -> "INITIALIZING"
+                    is ModelLifecycleState.InferenceRunning -> "INFERENCE_RUNNING"
+                    ModelLifecycleState.Aborting -> "ABORTING"
+                    is ModelLifecycleState.Error -> "ERROR"
+                    else -> "NOT_LOADED"
+                }
+                val fileName = "llmlab_diagnose_${System.currentTimeMillis()}.${if (asJson) "json" else "txt"}"
+                val report = if (asJson) {
+                    ExportManager.generateJson(context = context, runs = runs, config = _config.value, telemetry = _telemetry.value, engineVersion = engineVer, modelName = modelName, modelSizeFormatted = modelSize, modelInfo = modelInfo, modelStatus = modelStatus)
+                } else {
+                    ExportManager.generateTxt(context = context, runs = runs, config = _config.value, telemetry = _telemetry.value, engineVersion = engineVer, modelName = modelName, modelSizeFormatted = modelSize, modelInfo = modelInfo, modelStatus = modelStatus)
+                }
                 withContext(Dispatchers.Main) {
-                    ExportManager.shareExport(context, txt, "llmlab_diagnose_${System.currentTimeMillis()}.txt", "text/plain")
+                    ExportManager.shareExport(context, report, fileName, if (asJson) "application/json" else "text/plain")
+                    _exportStatus.value = "Exportdatei erstellt. Android-Teilen-Dialog geöffnet."
+                }
+            } catch (error: Exception) {
+                Log.e("LLMLabViewModel", "Diagnoseexport fehlgeschlagen", error)
+                val errorFile = File(context.filesDir, "llmlab-last-export-error.txt")
+                runCatching {
+                    errorFile.writeText("LLM Lab Diagnoseexport fehlgeschlagen\n${System.currentTimeMillis()}\n${error.stackTraceToString()}", Charsets.UTF_8)
+                }
+                withContext(Dispatchers.Main) {
+                    _exportStatus.value = "Export fehlgeschlagen: ${error.message ?: error.javaClass.simpleName}. Fehlerdetails lokal gespeichert."
                 }
             }
         }

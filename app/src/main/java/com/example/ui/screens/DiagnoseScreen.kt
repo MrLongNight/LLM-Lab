@@ -32,6 +32,7 @@ fun DiagnoseScreen(viewModel: LLMLabViewModel) {
     val telemetry by viewModel.telemetry.collectAsState()
     val config by viewModel.config.collectAsState()
     val history by viewModel.testRunHistory.collectAsState()
+    val exportStatus by viewModel.exportStatus.collectAsState()
 
     Column(
         modifier = Modifier
@@ -81,6 +82,10 @@ fun DiagnoseScreen(viewModel: LLMLabViewModel) {
                     Text("TXT", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 }
             }
+        }
+
+        exportStatus?.let { status ->
+            Text(text = status, color = if (status.startsWith("Export fehlgeschlagen")) LaserCrimson else MatrixGreen, fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp))
         }
 
         Spacer(modifier = Modifier.height(12.dp))

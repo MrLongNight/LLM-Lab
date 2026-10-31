@@ -183,11 +183,19 @@ object ExportManager {
         return sb.toString()
     }
 
+    internal fun createChooserIntent(sendIntent: Intent, title: String): Intent =
+        Intent.createChooser(sendIntent, title).apply {
+            // The ViewModel uses Application context; NEW_TASK is required for startActivity.
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
     fun shareExport(context: Context, content: String, fileName: String, mimeType: String) {
         val exportDir = File(context.cacheDir, "exports")
-        if (!exportDir.exists()) exportDir.mkdirs()
+        if (!exportDir.exists() && !exportDir.mkdirs()) {
+            throw java.io.IOException("Exportverzeichnis konnte nicht erstellt werden: ${exportDir.absolutePath}")
+        }
         val file = File(exportDir, fileName)
-        file.writeText(content)
+        file.writeText(content, Charsets.UTF_8)
 
         val uri: Uri = FileProvider.getUriForFile(
             context,
@@ -200,6 +208,6 @@ object ExportManager {
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        context.startActivity(Intent.createChooser(intent, "Diagnosebericht exportieren"))
+        context.startActivity(createChooserIntent(intent, "Diagnosebericht exportieren"))
     }
 }
