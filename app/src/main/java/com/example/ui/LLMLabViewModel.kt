@@ -64,7 +64,8 @@ sealed class ModelLifecycleState {
         val fileSizeBytes: Long,
         val ggufInfo: GgufInfo,
         val initDurationMs: Long,
-        val engineVersion: String
+        val engineVersion: String,
+        val loadedConfig: InferenceConfig
     ) : ModelLifecycleState()
     data class InferenceRunning(
         val prompt: String,
@@ -270,6 +271,12 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
         _config.value = newConfig
     }
 
+    /** True when a setting changed a parameter that is fixed in the loaded native context. */
+    fun requiresModelReload(): Boolean {
+        val ready = _modelState.value as? ModelLifecycleState.Ready ?: return false
+        return !ready.loadedConfig.hasSameNativeContext(_config.value)
+    }
+
     fun setProfilePreset(preset: ProfilePreset) {
         _config.value = InferenceConfig.fromPreset(preset).copy(
             timeoutInitSec = _config.value.timeoutInitSec,
@@ -430,8 +437,9 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     null, "Lade Modell und erstelle llama.cpp Context...", System.currentTimeMillis() - startTime
                 )
 
+                val configForLoad = _config.value
                 val outError = arrayOfNulls<String>(1)
-                val loadSuccess = nativeBridge.loadModel(cacheModel.absolutePath, _config.value, outError)
+                val loadSuccess = nativeBridge.loadModel(cacheModel.absolutePath, configForLoad, outError)
 
                 if (timedOut.get() || nativeBridge.isAbortRequested()) {
                     if (loadSuccess) nativeBridge.unloadModel()
@@ -454,7 +462,8 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                         fileSizeBytes = cacheModel.length(),
                         ggufInfo = selected.ggufInfo,
                         initDurationMs = System.currentTimeMillis() - startTime,
-                        engineVersion = nativeBridge.getEngineVersion()
+                        engineVersion = nativeBridge.getEngineVersion(),
+                        loadedConfig = configForLoad
                     )
                 }
             } catch (e: Exception) {

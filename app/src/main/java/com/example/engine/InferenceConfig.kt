@@ -20,6 +20,11 @@ data class InferenceConfig(
     val timeoutNormalInferenceSec: Int = 90,
     val timeoutStressTestSec: Int = 120
 ) {
+    /** Parameters fixed at native llama.cpp context creation time. */
+    fun hasSameNativeContext(other: InferenceConfig): Boolean =
+        nCtx == other.nCtx && nBatch == other.nBatch &&
+            nUbatch == other.nUbatch && nThreads == other.nThreads
+
     companion object {
         fun fromPreset(preset: ProfilePreset): InferenceConfig {
             val availableCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
