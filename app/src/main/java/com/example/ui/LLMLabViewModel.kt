@@ -16,6 +16,7 @@ import com.example.engine.InferenceConfig
 import com.example.engine.LlamaNativeBridge
 import com.example.engine.NativeMetrics
 import com.example.engine.ProfilePreset
+import com.example.engine.PromptResultValidator
 import com.example.engine.PromptTestCatalog
 import com.example.engine.PromptTestCase
 import com.example.engine.SystemTelemetry
@@ -70,7 +71,9 @@ sealed class ModelLifecycleState {
         val streamingText: String,
         val tokenCount: Int,
         val tps: Float,
-        val elapsedMs: Long
+        val elapsedMs: Long,
+        val stage: String = "Prompt-Evaluierung",
+        val progressPercent: Float? = null
     ) : ModelLifecycleState()
     object Aborting : ModelLifecycleState()
     data class Error(
@@ -512,7 +515,9 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                         streamingText = streamedResponse.toString(),
                         tokenCount = tokenCounter,
                         tps = 0f,
-                        elapsedMs = elapsed
+                        elapsedMs = elapsed,
+                        stage = "Token-Generierung",
+                        progressPercent = null
                     )
                     _chatMessages.value = _chatMessages.value.map { message ->
                         if (message.id == assistantPlaceholderId) {
@@ -522,8 +527,16 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 }
 
                 override fun onProgress(progressPercent: Float, step: Int) {
-                    // Der Fortschritt wird aus nativen Prompt-Decode-Rückmeldungen geliefert.
-                    // Das UI zeigt ihn erst an, wenn ein eigenes Prompt-Eval-State-Feld vorhanden ist.
+                    val elapsed = System.currentTimeMillis() - startTime
+                    _modelState.value = ModelLifecycleState.InferenceRunning(
+                        prompt = promptText,
+                        streamingText = streamedResponse.toString(),
+                        tokenCount = tokenCounter,
+                        tps = 0f,
+                        elapsedMs = elapsed,
+                        stage = "Prompt-Evaluierung",
+                        progressPercent = progressPercent.coerceIn(0f, 100f)
+                    )
                 }
             }
 
@@ -563,7 +576,8 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 nUbatch = currentConfig.nUbatch,
                 nThreads = currentConfig.nThreads,
                 finishReason = finalMetrics.finishReason,
-                isSuccess = finalMetrics.finishReason == "STOP_TOKEN" || finalMetrics.finishReason == "MAX_TOKENS",
+                isSuccess = (finalMetrics.finishReason == "STOP_TOKEN" || finalMetrics.finishReason == "MAX_TOKENS") &&
+                    finalMetrics.generatedTokens > 0,
                 errorMessage = finalMetrics.errorMessage,
                 javaHeapBytes = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory(),
                 nativeHeapBytes = nativeBridge.getAllocatedHeap(),
