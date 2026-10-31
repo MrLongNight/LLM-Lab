@@ -115,7 +115,7 @@ class ExampleRobolectricTest {
 
         val config = viewModel.config.value
         assertEquals(ProfilePreset.BALANCED, config.selectedProfile)
-        assertEquals(8, config.nUbatch)
+        assertEquals(32, config.nUbatch)
         assertEquals(120, config.timeoutInitSec)
         assertEquals(30, config.timeoutShortTestSec)
         assertEquals(90, config.timeoutNormalInferenceSec)
@@ -126,7 +126,7 @@ class ExampleRobolectricTest {
         assertEquals(4, viewModel.config.value.nUbatch)
 
         viewModel.setProfilePreset(ProfilePreset.MAX_THROUGHPUT)
-        assertEquals(16, viewModel.config.value.nUbatch)
+        assertEquals(32, viewModel.config.value.nUbatch)
     }
 
     @Test
