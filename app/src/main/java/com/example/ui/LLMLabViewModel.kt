@@ -808,8 +808,14 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     callback = callback,
                     timeoutSeconds = config.timeoutStressTestSec
                 )
-                val succeeded = metrics.finishReason == "STOP_TOKEN" ||
-                    metrics.finishReason == "MAX_TOKENS"
+                val inferenceCompleted =
+                    (metrics.finishReason == "STOP_TOKEN" || metrics.finishReason == "MAX_TOKENS") &&
+                        metrics.generatedTokens > 0
+                val responseMatches = collectedText.toString().trim() == "OK"
+                val succeeded = inferenceCompleted && responseMatches
+                val runError = metrics.errorMessage ?: if (inferenceCompleted && !responseMatches) {
+                    "Erwartet wurde exakt OK; erhalten: ${collectedText.toString().take(120)}"
+                } else null
 
                 dao.insertRun(TestRunEntity(
                     testCategory = "BENCHMARK_STRESS",
@@ -828,7 +834,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     nThreads = config.nThreads,
                     finishReason = metrics.finishReason,
                     isSuccess = succeeded,
-                    errorMessage = metrics.errorMessage,
+                    errorMessage = runError,
                     modelName = readyState.fileName,
                     promptTokenizeDurationMs = metrics.promptTokenizeDurationMs,
                     firstTokenDurationMs = metrics.firstTokenDurationMs,
@@ -847,7 +853,11 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                             stopReason = "Durch Nutzer abgebrochen."
                         }
                         else -> {
-                            stopReason = "Auto-Stop: Native Engine-Fehler: ${metrics.errorMessage ?: metrics.finishReason}"
+                            stopReason = if (inferenceCompleted && !responseMatches) {
+                                "Auto-Stop: Inhaltstest fehlgeschlagen; erwartet wurde exakt OK."
+                            } else {
+                                "Auto-Stop: Native Engine-Fehler: ${metrics.errorMessage ?: metrics.finishReason}"
+                            }
                             if (metrics.finishReason == "NATIVE_ERROR") {
                                 nativeBridge.unloadModel()
                                 _modelState.value = ModelLifecycleState.Error(
