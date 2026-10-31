@@ -64,25 +64,33 @@ if(ANDROID AND (NOT DEFINED SPIRV-Headers_DIR OR "${SPIRV-Headers_DIR}" MATCHES 
     endif()
 endif()
 
-add_subdirectory("${LLAMA_CPP_SOURCE}" "${CMAKE_BINARY_DIR}/llama.cpp" EXCLUDE_FROM_ALL)
-
-# Android's NDK ships Vulkan C headers but not Vulkan-Hpp. The host
-# libvulkan-dev package supplies the header-only C++ bindings required by
-# ggml-vulkan. Add only their include path; do not link the host Vulkan loader.
-if(ANDROID AND TARGET ggml-vulkan)
-    find_path(LLMLAB_VULKAN_HPP_INCLUDE_DIR
+# Android's NDK does not ship Vulkan-Hpp. The host libvulkan-dev package
+# provides these header-only bindings. Stage only Vulkan headers (not /usr/include)
+# into an isolated include root so host libc headers cannot shadow the Android NDK.
+if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android")
+    find_path(LLMLAB_VULKAN_HOST_INCLUDE_DIR
         NAMES vulkan/vulkan.hpp
         PATHS /usr/include /usr/local/include
         NO_DEFAULT_PATH
         NO_CMAKE_FIND_ROOT_PATH
     )
-    if(NOT LLMLAB_VULKAN_HPP_INCLUDE_DIR)
+    if(NOT LLMLAB_VULKAN_HOST_INCLUDE_DIR)
         message(FATAL_ERROR "Vulkan-Hpp headers not found. Install the host libvulkan-dev package.")
     endif()
-    target_include_directories(ggml-vulkan SYSTEM PRIVATE
-        "${LLMLAB_VULKAN_HPP_INCLUDE_DIR}"
-    )
+    set(LLMLAB_VULKAN_STAGED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/llmlab-vulkan-host-headers")
+    file(MAKE_DIRECTORY "${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}")
+    file(COPY "${LLMLAB_VULKAN_HOST_INCLUDE_DIR}/vulkan" DESTINATION "${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}")
+    if(EXISTS "${LLMLAB_VULKAN_HOST_INCLUDE_DIR}/vk_video")
+        file(COPY "${LLMLAB_VULKAN_HOST_INCLUDE_DIR}/vk_video" DESTINATION "${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}")
+    endif()
+    if(NOT EXISTS "${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}/vulkan/vulkan.hpp")
+        message(FATAL_ERROR "Failed to stage Vulkan-Hpp headers for the Android build.")
+    endif()
+    include_directories(SYSTEM BEFORE "${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}")
+    message(STATUS "LLM Lab: staged Vulkan-Hpp headers for Android at ${LLMLAB_VULKAN_STAGED_INCLUDE_DIR}")
 endif()
+
+add_subdirectory("${LLAMA_CPP_SOURCE}" "${CMAKE_BINARY_DIR}/llama.cpp" EXCLUDE_FROM_ALL)
 add_library(llmlab_native SHARED llmlab_native.cpp)
 target_include_directories(llmlab_native PRIVATE "${LLAMA_CPP_SOURCE}/include" "${LLAMA_CPP_SOURCE}/ggml/include")
 target_compile_features(llmlab_native PRIVATE cxx_std_17)
