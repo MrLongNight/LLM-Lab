@@ -36,7 +36,7 @@ class ExampleRobolectricTest {
     @Test
     fun `JVM host never reports simulated model loading or inference`() {
         Assume.assumeFalse("Test only applies when JNI is unavailable on the Robolectric host.", LlamaNativeBridge.isNativeLibraryLoaded)
-        val bridge = LlamaNativeBridge()
+        val bridge = LlamaNativeBridge(ApplicationProvider.getApplicationContext<Application>().applicationInfo.nativeLibraryDir)
         val error = arrayOfNulls<String>(1)
         val loaded = bridge.loadModel(
             "/does/not/exist/model.gguf",
