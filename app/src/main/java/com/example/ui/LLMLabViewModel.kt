@@ -965,7 +965,10 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     fun exportReport(asJson: Boolean) {
         viewModelScope.launch(Dispatchers.IO) {
             val context = getApplication<Application>()
-            _exportStatus.value = "Diagnoseexport wird vorbereitet..."
+            _exportStatus.value = "Diagnoseexport wird erstellt..."
+            var report: String? = null
+            val fileName = "llmlab_diagnose_${System.currentTimeMillis()}.${if (asJson) "json" else "txt"}"
+            val mimeType = if (asJson) "application/json" else "text/plain"
             try {
                 val runs = testRunHistory.value.take(200)
                 val engineVer = nativeBridge.getEngineVersion()
@@ -988,28 +991,39 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     is ModelLifecycleState.Error -> "ERROR"
                     else -> "NOT_LOADED"
                 }
-                val fileName = "llmlab_diagnose_${System.currentTimeMillis()}.${if (asJson) "json" else "txt"}"
-                val report = if (asJson) {
-                    ExportManager.generateJson(context = context, runs = runs, config = _config.value, telemetry = _telemetry.value, engineVersion = engineVer, modelName = modelName, modelSizeFormatted = modelSize, modelInfo = modelInfo, modelStatus = modelStatus)
+                report = if (asJson) {
+                    ExportManager.generateJson(context, runs, _config.value, _telemetry.value, engineVer, modelName, modelSize, modelInfo, modelStatus)
                 } else {
-                    ExportManager.generateTxt(context = context, runs = runs, config = _config.value, telemetry = _telemetry.value, engineVersion = engineVer, modelName = modelName, modelSizeFormatted = modelSize, modelInfo = modelInfo, modelStatus = modelStatus)
+                    ExportManager.generateTxt(context, runs, _config.value, _telemetry.value, engineVer, modelName, modelSize, modelInfo, modelStatus)
                 }
+
+                val savedPath = ExportManager.saveExportToDownloads(context, report!!, fileName, mimeType)
                 withContext(Dispatchers.Main) {
-                    ExportManager.shareExport(context, report, fileName, if (asJson) "application/json" else "text/plain")
-                    _exportStatus.value = "Exportdatei erstellt. Android-Teilen-Dialog geöffnet."
+                    _exportStatus.value = "Gespeichert: $savedPath"
                 }
             } catch (error: Throwable) {
                 Log.e("LLMLabViewModel", "Diagnoseexport fehlgeschlagen", error)
+                val emergencyCopy = report?.let {
+                    runCatching { ExportManager.saveInternalFallback(context, it, fileName) }.getOrNull()
+                }
                 val errorFile = File(context.filesDir, "llmlab-last-export-error.txt")
                 runCatching {
-                    errorFile.writeText("LLM Lab Diagnoseexport fehlgeschlagen\n${System.currentTimeMillis()}\n${error.stackTraceToString()}", Charsets.UTF_8)
+                    FileOutputStream(errorFile).use { stream ->
+                        val details = "LLM Lab Diagnoseexport fehlgeschlagen\n${System.currentTimeMillis()}\n${error.javaClass.name}: ${error.message}\n${error.stackTraceToString()}"
+                        stream.write(details.toByteArray(Charsets.UTF_8))
+                        stream.fd.sync()
+                    }
                 }
-                withContext(Dispatchers.Main) {
-                    _exportStatus.value = "Export fehlgeschlagen: ${error.message ?: error.javaClass.simpleName}. Fehlerdetails lokal gespeichert."
+                val status = if (emergencyCopy != null) {
+                    "Downloads fehlgeschlagen. Notfallkopie intern gespeichert: $emergencyCopy"
+                } else {
+                    "Export fehlgeschlagen: ${error.message ?: error.javaClass.simpleName}. Fehlerprotokoll intern gespeichert."
                 }
+                withContext(Dispatchers.Main) { _exportStatus.value = status }
             }
         }
     }
+
     fun clearHistory() {
         viewModelScope.launch(Dispatchers.IO) {
             dao.clearAll()
