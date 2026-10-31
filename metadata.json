@@ -1,6 +1,6 @@
 {
   "name": "LLM Lab",
-  "description": "Mobile Inference Testbench für lokale GGUF LLM-Modelle (Qwen 2.5) mit nativer llama.cpp JNI-Engine, Abort-System und technischer Diagnose",
+  "description": "Eigenständige Android-Testbench zur Entwicklung und Diagnose lokaler GGUF-LLM-Inferenz. Keine Firebase-, Gemini-, Cloud- oder Server-API-Abhängigkeit.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }

@@ -33,9 +33,8 @@ jobs:
       - name: Grant Execute Permission to Gradlew
         run: chmod +x gradlew
 
-      - name: Prepare Environment and Debug Keystore
+      - name: Prepare Debug Keystore
         run: |
-          touch .env
           if [ -f "debug.keystore.base64" ]; then
             base64 -d debug.keystore.base64 > debug.keystore
           elif [ ! -f "debug.keystore" ]; then
