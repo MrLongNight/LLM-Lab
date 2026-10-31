@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.engine.ProfilePreset
 import com.example.ui.LLMLabViewModel
+import com.example.ui.ModelLifecycleState
 import com.example.ui.theme.*
 
 @Composable
