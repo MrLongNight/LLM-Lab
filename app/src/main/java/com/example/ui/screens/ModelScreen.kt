@@ -162,13 +162,21 @@ fun ModelScreen(viewModel: LLMLabViewModel) {
                         )
 
                         Text("Dateiname: ${state.fileName}", color = TextPrimary, fontSize = 13.sp)
-                        Text("Größe: ${"%.2f".format(state.fileSizeBytes / (1024f * 1024f * 1024f))} GB (${state.fileSizeBytes} Bytes)", color = TextSecondary, fontSize = 12.sp)
+                        Text(
+                            if (state.fileSizeBytes > 0L) {
+                                "Größe: ${"%.2f".format(state.fileSizeBytes / (1024f * 1024f * 1024f))} GB (${state.fileSizeBytes} Bytes)"
+                            } else {
+                                "Größe: nicht verfügbar"
+                            },
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
 
                         val info = state.ggufInfo
                         if (info.isValid) {
                             Text("Signatur: ${info.magic} (Version ${info.version}) - GÜLTIG", color = MatrixGreen, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
-                            Text("Architektur: ${info.architecture ?: "qwen2"}", color = TextSecondary, fontSize = 12.sp)
-                            Text("Typ: ${info.fileTypeDescription ?: "Q4_K_M"}", color = TextSecondary, fontSize = 12.sp)
+                            Text("Architektur: ${info.architecture ?: "Nicht verfügbar"}", color = TextSecondary, fontSize = 12.sp)
+                            Text("Typ: ${info.fileTypeDescription ?: "Nicht verfügbar"}", color = TextSecondary, fontSize = 12.sp)
                             Text("Tensoren: ${info.tensorCount} | KV-Einträge: ${info.kvCount}", color = TextSecondary, fontSize = 12.sp)
                         } else {
                             Text("Warnung: ${info.errorMessage ?: "Kein gültiger GGUF-Header"}", color = LaserCrimson, fontSize = 12.sp)
@@ -259,18 +267,31 @@ fun ModelScreen(viewModel: LLMLabViewModel) {
                             Text("Initialisierung läuft...", color = ElectricAmber, fontWeight = FontWeight.Bold)
                         }
 
-                        LinearProgressIndicator(
-                            progress = { state.progressPercent / 100f },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(8.dp)
-                                .clip(RoundedCornerShape(4.dp)),
-                            color = ElectricAmber,
-                            trackColor = DarkSurfaceVariant
-                        )
+                        if (state.progressPercent != null) {
+                            LinearProgressIndicator(
+                                progress = { state.progressPercent / 100f },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(8.dp)
+                                    .clip(RoundedCornerShape(4.dp)),
+                                color = ElectricAmber,
+                                trackColor = DarkSurfaceVariant
+                            )
+                        } else {
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth().height(8.dp),
+                                color = ElectricAmber,
+                                trackColor = DarkSurfaceVariant
+                            )
+                        }
 
                         Text("Phase: ${state.phase}", color = TextPrimary, fontSize = 13.sp)
-                        Text("Fortschritt: ${state.progressPercent.toInt()}% | Zeit: ${state.elapsedMs} ms", color = TextSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        Text(
+                            "Fortschritt: ${state.progressPercent?.let { "${it.toInt()}%" } ?: "nicht messbar"} | Zeit: ${state.elapsedMs} ms",
+                            color = TextSecondary,
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
 
                         OutlinedButton(
                             onClick = { viewModel.requestAbort() },

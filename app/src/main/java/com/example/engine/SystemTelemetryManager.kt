@@ -74,7 +74,7 @@ object SystemTelemetryManager {
             "Nicht verfügbar (Erfordert Android 10+)"
         }
 
-        val arch = if (Build.SUPPORTED_ABIS.isNotEmpty()) Build.SUPPORTED_ABIS[0] else "arm64-v8a"
+        val arch = if (Build.SUPPORTED_ABIS.isNotEmpty()) Build.SUPPORTED_ABIS[0] else "Nicht verfügbar"
         val cores = Runtime.getRuntime().availableProcessors()
 
         return SystemTelemetry(

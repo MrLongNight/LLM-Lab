@@ -1,5 +1,6 @@
 package com.example.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
@@ -28,8 +29,12 @@ data class TestRunEntity(
     val javaHeapBytes: Long = 0,
     val nativeHeapBytes: Long = 0,
     val modelName: String = "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+    @ColumnInfo(defaultValue = "0")
     val promptTokenizeDurationMs: Long = 0,
+    @ColumnInfo(defaultValue = "0")
     val firstTokenDurationMs: Long = 0,
+    @ColumnInfo(defaultValue = "0")
     val promptDecodeCalls: Int = 0,
+    @ColumnInfo(defaultValue = "0")
     val generationDecodeCalls: Int = 0
 )

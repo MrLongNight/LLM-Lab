@@ -90,6 +90,16 @@ object GgufMetadataParser {
             }
 
             val version = buffer.int
+            if (version !in 2..3) {
+                return GgufInfo(
+                    isValid = false,
+                    magic = magicStr,
+                    version = version,
+                    tensorCount = 0,
+                    kvCount = 0,
+                    errorMessage = "Nicht unterstützte GGUF-Version: $version. Unterstützt werden Version 2 und 3."
+                )
+            }
             val tensorCount = buffer.long
             val kvCount = buffer.long
 
@@ -113,17 +123,14 @@ object GgufMetadataParser {
             val arch = metadata["general.architecture"]
             val modelName = metadata["general.name"]
                 ?: metadata["${arch}.model_name"]
-                ?: (if (arch != null) "Qwen 2.5 ($arch)" else "GGUF Model")
+                ?: (arch?.let { "GGUF Model ($it)" } ?: "GGUF Model")
 
             val fileType = metadata["general.file_type"]?.toIntOrNull()
             val fileTypeDesc = describeFileType(fileType)
 
-            val contextLength = metadata["${arch}.context_length"]?.toLongOrNull()
-                ?: metadata["qwen2.context_length"]?.toLongOrNull()
-            val embeddingLength = metadata["${arch}.embedding_length"]?.toLongOrNull()
-                ?: metadata["qwen2.embedding_length"]?.toLongOrNull()
-            val blockCount = metadata["${arch}.block_count"]?.toLongOrNull()
-                ?: metadata["qwen2.block_count"]?.toLongOrNull()
+            val contextLength = arch?.let { metadata["$it.context_length"]?.toLongOrNull() }
+            val embeddingLength = arch?.let { metadata["$it.embedding_length"]?.toLongOrNull() }
+            val blockCount = arch?.let { metadata["$it.block_count"]?.toLongOrNull() }
 
             return GgufInfo(
                 isValid = true,

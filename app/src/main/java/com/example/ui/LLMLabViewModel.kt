@@ -54,7 +54,7 @@ sealed class ModelLifecycleState {
         val ggufInfo: GgufInfo
     ) : ModelLifecycleState()
     data class Initializing(
-        val progressPercent: Float,
+        val progressPercent: Float?,
         val phase: String,
         val elapsedMs: Long
     ) : ModelLifecycleState()
@@ -139,6 +139,11 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
 
     private var activeInferenceJob: Job? = null
     @Volatile private var engineOperationGeneration: Long = 0L
+    private val nativeEngineUnresponsive = AtomicBoolean(false)
+
+    private companion object {
+        const val NATIVE_ABORT_GRACE_MS = 10_000L
+    }
     private var localCachedModelUri: Uri? = null
     private var lastModelSelection: ModelLifecycleState.ModelSelected? = null
 
@@ -153,20 +158,53 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
-     * Native JNI calls are blocking. A new operation first signals abort to the
-     * previous one and then waits for its JNI call to return before resetting
-     * the native abort flag and starting another operation.
+     * JNI calls are blocking. Operations are serialized and the next operation
+     * waits for the previous native call to return after its abort signal.
      */
+    private fun monitorNativeAbortResponsiveness(operation: Job?, phase: String) {
+        if (operation == null) return
+        viewModelScope.launch(Dispatchers.Default) {
+            delay(NATIVE_ABORT_GRACE_MS)
+            if (operation.isActive) {
+                nativeEngineUnresponsive.set(true)
+                val message = "$phase: Der native JNI-Aufruf hat das Abbruchsignal nicht innerhalb von ${NATIVE_ABORT_GRACE_MS / 1000}s quittiert. Die Engine kann nicht sicher gewaltsam beendet werden. Bitte LLM Lab neu starten."
+                _modelState.value = ModelLifecycleState.Error(message)
+                _labActiveTest.value = null
+                _benchmarkSummary.value = _benchmarkSummary.value.copy(
+                    isRunning = false,
+                    stopReason = message
+                )
+                _chatMessages.value = _chatMessages.value.map { item ->
+                    if (item.isStreaming) item.copy(text = message, isStreaming = false) else item
+                }
+            }
+        }
+    }
+
     private fun launchEngineOperation(block: suspend () -> Unit) {
+        if (nativeEngineUnresponsive.get()) {
+            _modelState.value = ModelLifecycleState.Error(
+                "Die native Engine hat zuvor nicht auf einen Abbruch reagiert. Bitte LLM Lab neu starten."
+            )
+            return
+        }
+
         val generation = ++engineOperationGeneration
         val previous = activeInferenceJob
         if (previous?.isActive == true) {
             nativeBridge.requestAbort()
+            monitorNativeAbortResponsiveness(previous, "Vorheriger nativer Vorgang")
         }
 
         val next = viewModelScope.launch(Dispatchers.IO) {
             previous?.join()
             if (generation != engineOperationGeneration) return@launch
+            if (nativeEngineUnresponsive.get()) {
+                _modelState.value = ModelLifecycleState.Error(
+                    "Die native Engine ist nicht mehr antwortfähig. Bitte LLM Lab neu starten."
+                )
+                return@launch
+            }
             nativeBridge.prepareForOperation()
             block()
         }
@@ -179,27 +217,31 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
         callback: InferenceCallback,
         timeoutSeconds: Int
     ): NativeMetrics {
-        nativeBridge.prepareForOperation()
         val timedOut = AtomicBoolean(false)
+        val operation = activeInferenceJob
         val watchdog = viewModelScope.launch(Dispatchers.Default) {
             delay(timeoutSeconds.coerceAtLeast(1) * 1000L)
             timedOut.set(true)
             _modelState.value = ModelLifecycleState.Aborting
             nativeBridge.requestAbort()
+            monitorNativeAbortResponsiveness(operation, "Inferenz-Timeout")
         }
 
         return try {
             val nativeMetrics = nativeBridge.executeInference(prompt, config, callback)
-            if (timedOut.get()) {
-                nativeMetrics.copy(
+            when {
+                nativeEngineUnresponsive.get() -> nativeMetrics.copy(
+                    finishReason = "NATIVE_ERROR",
+                    errorMessage = "Die native Engine hat das Abbruchsignal nicht rechtzeitig quittiert. App-Neustart erforderlich."
+                )
+                timedOut.get() -> nativeMetrics.copy(
                     finishReason = "TIMEOUT",
                     errorMessage = listOfNotNull(
                         "Timeout nach ${timeoutSeconds.coerceAtLeast(1)}s; nativer Abbruch wurde angefordert.",
                         nativeMetrics.errorMessage
                     ).joinToString(" ")
                 )
-            } else {
-                nativeMetrics
+                else -> nativeMetrics
             }
         } finally {
             watchdog.cancel()
@@ -287,11 +329,12 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 timedOut.set(true)
                 _modelState.value = ModelLifecycleState.Aborting
                 nativeBridge.requestAbort()
+                monitorNativeAbortResponsiveness(activeInferenceJob, "Modellinitialisierung")
             }
 
             try {
                 _modelState.value = ModelLifecycleState.Initializing(
-                    5f, "Bereite GGUF-Datei für native Engine vor...", 0
+                    null, "Bereite GGUF-Datei für native Engine vor...", 0
                 )
 
                 val context = getApplication<Application>()
@@ -306,7 +349,8 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 if (!canReuse) {
                     cachePart.delete()
                     _modelState.value = ModelLifecycleState.Initializing(
-                        10f, "Kopiere GGUF in den internen App-Speicher...", 0
+                        if (selected.fileSizeBytes > 0L) 10f else null,
+                        "Kopiere GGUF in den internen App-Speicher...", 0
                     )
                     val input = context.contentResolver.openInputStream(selected.uri)
                         ?: throw IOException("Die ausgewählte GGUF-Datei konnte nicht geöffnet werden.")
@@ -323,14 +367,14 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                                 if (read < 0) break
                                 output.write(buffer, 0, read)
                                 totalCopied += read
-                                val percent = if (selected.fileSizeBytes > 0L) {
+                                val percent: Float? = if (selected.fileSizeBytes > 0L) {
                                     (10f + 70f * totalCopied.toFloat() / selected.fileSizeBytes.toFloat()).coerceIn(10f, 80f)
                                 } else {
-                                    10f
+                                    null
                                 }
                                 _modelState.value = ModelLifecycleState.Initializing(
                                     percent,
-                                    "Kopiere \${totalCopied / (1024 * 1024)} MB...",
+                                    "Kopiere ${totalCopied / (1024 * 1024)} MB...",
                                     System.currentTimeMillis() - startTime
                                 )
                             }
@@ -346,7 +390,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     if (selected.fileSizeBytes > 0L && totalCopied != selected.fileSizeBytes) {
                         throw IOException(
-                            "Unvollständige Modellkopie: \${totalCopied} von \${selected.fileSizeBytes} Bytes."
+                            "Unvollständige Modellkopie: ${totalCopied} von ${selected.fileSizeBytes} Bytes."
                         )
                     }
 
@@ -369,7 +413,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 localCachedModelUri = selected.uri
 
                 _modelState.value = ModelLifecycleState.Initializing(
-                    85f, "Lade Modell und erstelle llama.cpp Context...", System.currentTimeMillis() - startTime
+                    null, "Lade Modell und erstelle llama.cpp Context...", System.currentTimeMillis() - startTime
                 )
 
                 val outError = arrayOfNulls<String>(1)
@@ -378,12 +422,16 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 if (timedOut.get() || nativeBridge.isAbortRequested()) {
                     if (loadSuccess) nativeBridge.unloadModel()
                     _modelState.value = ModelLifecycleState.Error(
-                        if (timedOut.get()) "TIMEOUT: Modellinitialisierung überschritt \${timeoutSeconds}s."
+                        if (timedOut.get()) "TIMEOUT: Modellinitialisierung überschritt ${timeoutSeconds}s."
                         else "Modellinitialisierung wurde abgebrochen."
                     )
                 } else if (!loadSuccess) {
                     _modelState.value = ModelLifecycleState.Error(
                         outError[0] ?: "Native llama.cpp Modellinitialisierung fehlgeschlagen."
+                    )
+                } else if (nativeEngineUnresponsive.get()) {
+                    _modelState.value = ModelLifecycleState.Error(
+                        "Die native Modellinitialisierung hat nicht rechtzeitig auf den Abbruch reagiert. Bitte App neu starten."
                     )
                 } else {
                     _modelState.value = ModelLifecycleState.Ready(
@@ -397,9 +445,10 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             } catch (e: Exception) {
                 File(getApplication<Application>().filesDir, "active_model.gguf.part").delete()
                 val message = when {
-                    timedOut.get() -> "TIMEOUT: Modellinitialisierung überschritt \${timeoutSeconds}s."
+                    nativeEngineUnresponsive.get() -> "Die native Modellinitialisierung reagiert nicht mehr. Bitte App neu starten."
+                    timedOut.get() -> "TIMEOUT: Modellinitialisierung überschritt ${timeoutSeconds}s."
                     nativeBridge.isAbortRequested() -> "Modellinitialisierung wurde durch den Nutzer abgebrochen."
-                    else -> "Initialisierungsfehler: \${e.message}"
+                    else -> "Initialisierungsfehler: ${e.message}"
                 }
                 _modelState.value = ModelLifecycleState.Error(message)
             } finally {
@@ -501,8 +550,8 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             dao.insertRun(TestRunEntity(
                 testCategory = "CHAT",
                 testTitle = "Chat Inferenz (Inhalt redigiert)",
-                promptText = "[CHAT_PROMPT_REDACTED; chars=\${promptText.length}]",
-                responseText = "[CHAT_RESPONSE_REDACTED; chars=\${response.length}]",
+                promptText = "[CHAT_PROMPT_REDACTED; chars=${promptText.length}]",
+                responseText = "[CHAT_RESPONSE_REDACTED; chars=${response.length}]",
                 promptTokens = finalMetrics.promptTokens,
                 generatedTokens = finalMetrics.generatedTokens,
                 promptEvalDurationMs = finalMetrics.promptEvalDurationMs,
@@ -543,6 +592,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             // Abort-Flag und wird dort während llama_decode geprüft.
             _modelState.value = ModelLifecycleState.Aborting
             nativeBridge.requestAbort()
+            monitorNativeAbortResponsiveness(activeInferenceJob, "Manueller Abbruch")
         }
         // Kein Job.cancel(): Ein blockierender JNI-Aufruf wird nur durch das
         // native Abort-Signal beendet. Die Operation räumt sich selbst auf.
@@ -584,7 +634,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     override fun onToken(tokenText: String, tokenIndex: Int) {
                         localStream.append(tokenText)
                         _labTestOutput.value = if (testCase.repetitionCount > 1) {
-                            "Wiederholung $repetition / \${testCase.repetitionCount}:\n\${localStream}"
+                            "Wiederholung $repetition / ${testCase.repetitionCount}:\n${localStream}"
                         } else {
                             localStream.toString()
                         }
@@ -609,7 +659,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 dao.insertRun(TestRunEntity(
                     testCategory = testCase.id,
                     testTitle = if (testCase.repetitionCount > 1) {
-                        "\${testCase.title} (#$repetition)"
+                        "${testCase.title} (#$repetition)"
                     } else {
                         testCase.title
                     },
@@ -645,13 +695,16 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                         _modelState.value = readyState
                     }
                     if (localStream.isEmpty()) {
-                        _labTestOutput.value = "Keine Antwort. Status: \${metrics.finishReason}\n\${metrics.errorMessage.orEmpty()}"
+                        _labTestOutput.value = "Keine Antwort. Status: ${metrics.finishReason}\n${metrics.errorMessage.orEmpty()}"
                     }
                     break
                 }
             }
 
             _labActiveTest.value = null
+            if (!nativeEngineUnresponsive.get() && _modelState.value !is ModelLifecycleState.Error) {
+                _modelState.value = readyState
+            }
         }
     }
 
@@ -733,13 +786,13 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     when (metrics.finishReason) {
                         "TIMEOUT" -> {
                             timeoutRuns++
-                            stopReason = "Auto-Stop: Timeout nach \${config.timeoutStressTestSec}s; nativer Abbruch wurde ausgelöst."
+                            stopReason = "Auto-Stop: Timeout nach ${config.timeoutStressTestSec}s; nativer Abbruch wurde ausgelöst."
                         }
                         "ABORTED_BY_USER" -> {
                             stopReason = "Durch Nutzer abgebrochen."
                         }
                         else -> {
-                            stopReason = "Auto-Stop: Native Engine-Fehler: \${metrics.errorMessage ?: metrics.finishReason}"
+                            stopReason = "Auto-Stop: Native Engine-Fehler: ${metrics.errorMessage ?: metrics.finishReason}"
                             if (metrics.finishReason == "NATIVE_ERROR") {
                                 nativeBridge.unloadModel()
                                 _modelState.value = ModelLifecycleState.Error(
@@ -782,7 +835,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 stopReason = stopReason
             )
 
-            if (_modelState.value !is ModelLifecycleState.Error) {
+            if (!nativeEngineUnresponsive.get() && _modelState.value !is ModelLifecycleState.Error) {
                 _modelState.value = readyState
             }
         }
@@ -836,7 +889,20 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     override fun onCleared() {
+        nativeBridge.requestAbort()
+        val runningOperation = activeInferenceJob
+        Thread({
+            try {
+                kotlinx.coroutines.runBlocking {
+                    runningOperation?.join()
+                }
+            } finally {
+                nativeBridge.close()
+            }
+        }, "llmlab-native-cleanup").apply {
+            isDaemon = true
+            start()
+        }
         super.onCleared()
-        nativeBridge.close()
     }
 }

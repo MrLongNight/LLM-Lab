@@ -117,7 +117,7 @@ class MainActivity : ComponentActivity() {
                                             Spacer(modifier = Modifier.width(6.dp))
                                             Text(
                                                 text = when (modelState) {
-                                                    is ModelLifecycleState.Ready -> "Qwen 2.5 Ready"
+                                                    is ModelLifecycleState.Ready -> "Modell bereit"
                                                     is ModelLifecycleState.InferenceRunning -> "Inferenz"
                                                     is ModelLifecycleState.Initializing -> "Lade..."
                                                     is ModelLifecycleState.Error -> "Fehler"
