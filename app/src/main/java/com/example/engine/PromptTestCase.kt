@@ -63,19 +63,19 @@ object PromptTestCatalog {
         ),
         InferenceTestVariant(
             id = "CPU_WIDEBATCH",
-            label = "CPU-Optimierung · 6 Threads · ubatch 64",
+            label = "CPU-Optimierung · 8 Threads · ubatch 64",
             nBatch = 512,
             nUbatch = 64,
-            nThreads = 6,
+            nThreads = 8,
             nThreadsBatch = 8,
             backendPreference = BackendPreference.CPU_ONLY
         ),
         InferenceTestVariant(
             id = "VULKAN_OFFLOAD",
-            label = "Vulkan-Offload · 4 Threads · ubatch 64",
+            label = "Vulkan-Offload · 8 Threads · ubatch 64",
             nBatch = 512,
             nUbatch = 64,
-            nThreads = 4,
+            nThreads = 8,
             nThreadsBatch = 8,
             backendPreference = BackendPreference.ACCELERATOR_REQUIRED
         )

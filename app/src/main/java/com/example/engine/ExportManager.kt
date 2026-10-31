@@ -163,7 +163,9 @@ object ExportManager {
         modelInfo: GgufInfo? = null,
         modelStatus: String = "UNKNOWN",
         backendInfo: List<NativeBackendInfo> = emptyList(),
-        activeBackendName: String = "Nicht verfügbar"
+        activeBackendName: String = "Nicht verfügbar",
+        modelLoadLog: String = "",
+        workflowBackendReport: String = ""
     ): String {
         val sb = StringBuilder()
         val nowStr = SimpleDateFormat("dd.MM.yyyy HH:mm:ss", Locale.GERMANY).format(Date())
