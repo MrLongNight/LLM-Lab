@@ -15,7 +15,7 @@ jobs:
   build:
     name: Build Standalone Android APK
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
 
     steps:
       - name: Checkout Code
@@ -46,21 +46,7 @@ jobs:
       - name: Install Vulkan shader compiler and headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y glslc libvulkan-dev
-
-      - name: Build host Vulkan shader generator
-        shell: bash
-        run: |
-          set -euo pipefail
-          HOST_TOOLS="$RUNNER_TEMP/llmlab-host-tools"
-          mkdir -p "$HOST_TOOLS"
-          c++ -std=c++11 -O2 -pthread \
-            third_party/llama.cpp/ggml/src/vulkan-shaders/vulkan-shaders-gen.cpp \
-            -o "$HOST_TOOLS/vulkan-shaders-gen"
-          chmod +x "$HOST_TOOLS/vulkan-shaders-gen"
-          echo "$HOST_TOOLS" >> "$GITHUB_PATH"
-          "$HOST_TOOLS/vulkan-shaders-gen" --help >/dev/null 2>&1 || true
-          echo "Host Vulkan shader generator installed: $HOST_TOOLS/vulkan-shaders-gen"
+          sudo apt-get install -y glslc libvulkan-dev spirv-headers
 
       - name: Accept Android SDK Licenses and Install NDK/CMake
         shell: bash
@@ -92,13 +78,77 @@ jobs:
           echo "e9acab587ff1b6049bfac544f7c2203d1744354e" > "$SDK_ROOT/licenses/mips-android-sysimage-license"
 
           "$SDKMANAGER" --licenses
-          "$SDKMANAGER" "ndk;26.3.11579264" "cmake;3.22.1"
+          "$SDKMANAGER" "ndk;29.0.13113456" "cmake;3.31.6"
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug --no-daemon --no-configuration-cache --stacktrace
 
       - name: Run Unit and Robolectric Tests
         run: ./gradlew testDebugUnitTest --no-daemon --no-configuration-cache --stacktrace
+
+      - name: Verify packaged native backends
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          unzip -Z1 "$APK" | tee "$RUNNER_TEMP/llmlab-apk-files.txt"
+          grep -Eq 'lib/arm64-v8a/libllmlab_native\.so
+      - name: Prepare Standalone APK Artifact
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/LLM-Lab-Standalone-debug.apk
+
+      - name: Upload Standalone Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LLM-Lab-Standalone-Debug-APK
+          path: dist/LLM-Lab-Standalone-debug.apk
+          retention-days: 30
+          if-no-files-found: error
+ "$RUNNER_TEMP/llmlab-apk-files.txt"
+          grep -Eq 'lib/arm64-v8a/libggml-cpu[^/]*\.so
+      - name: Prepare Standalone APK Artifact
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/LLM-Lab-Standalone-debug.apk
+
+      - name: Upload Standalone Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LLM-Lab-Standalone-Debug-APK
+          path: dist/LLM-Lab-Standalone-debug.apk
+          retention-days: 30
+          if-no-files-found: error
+ "$RUNNER_TEMP/llmlab-apk-files.txt"
+          grep -Eq 'lib/arm64-v8a/libggml-vulkan[^/]*\.so
+      - name: Prepare Standalone APK Artifact
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/LLM-Lab-Standalone-debug.apk
+
+      - name: Upload Standalone Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LLM-Lab-Standalone-Debug-APK
+          path: dist/LLM-Lab-Standalone-debug.apk
+          retention-days: 30
+          if-no-files-found: error
+ "$RUNNER_TEMP/llmlab-apk-files.txt"
+          grep -Eq 'lib/x86_64/libllmlab_native\.so
+      - name: Prepare Standalone APK Artifact
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/LLM-Lab-Standalone-debug.apk
+
+      - name: Upload Standalone Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LLM-Lab-Standalone-Debug-APK
+          path: dist/LLM-Lab-Standalone-debug.apk
+          retention-days: 30
+          if-no-files-found: error
+ "$RUNNER_TEMP/llmlab-apk-files.txt"
+          echo "Runtime CPU variants and Vulkan backend are packaged."
 
       - name: Prepare Standalone APK Artifact
         run: |

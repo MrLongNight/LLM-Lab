@@ -11,17 +11,17 @@ android {
     applicationId = "de.mrlongnight.llmlab"
     minSdk = 29
     targetSdk = 36
-    versionCode = 3
-    versionName = "1.2"
+    versionCode = 4
+    versionName = "1.3"
     buildConfigField("String", "GIT_COMMIT", "\"${System.getenv("GITHUB_SHA") ?: "local"}\"")
-    ndk { abiFilters.add("arm64-v8a") }
+    ndk { abiFilters.addAll(listOf("arm64-v8a", "x86_64")) }
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
-  ndkVersion = "26.3.11579264"
+  ndkVersion = "29.0.13113456"
   externalNativeBuild {
     cmake {
       path = file("src/main/cpp/CMakeLists.txt")
-      version = "3.22.1"
+      version = "3.31.6"
     }
   }
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,
