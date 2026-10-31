@@ -139,7 +139,6 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
 
     private var activeInferenceJob: Job? = null
     @Volatile private var engineOperationGeneration: Long = 0L
-    private var localCachedModelFile: File? = null
     private var localCachedModelUri: Uri? = null
     private var lastModelSelection: ModelLifecycleState.ModelSelected? = null
 
@@ -367,7 +366,6 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     throw IOException("Die lokale Modellkopie ist nicht vollständig vorhanden.")
                 }
 
-                localCachedModelFile = cacheModel
                 localCachedModelUri = selected.uri
 
                 _modelState.value = ModelLifecycleState.Initializing(
@@ -397,7 +395,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     )
                 }
             } catch (e: Exception) {
-                cachePartSafeDelete(context = getApplication(), fileName = "active_model.gguf.part")
+                File(getApplication<Application>().filesDir, "active_model.gguf.part").delete()
                 val message = when {
                     timedOut.get() -> "TIMEOUT: Modellinitialisierung überschritt \${timeoutSeconds}s."
                     nativeBridge.isAbortRequested() -> "Modellinitialisierung wurde durch den Nutzer abgebrochen."
@@ -539,6 +537,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun requestAbort() {
+        engineOperationGeneration++
         if (activeInferenceJob?.isActive == true) {
             // Das Signal läuft unabhängig vom Coroutine-Thread direkt zum nativen
             // Abort-Flag und wird dort während llama_decode geprüft.

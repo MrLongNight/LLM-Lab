@@ -8,6 +8,8 @@ import com.example.data.AppDatabase
 import com.example.data.TestRunEntity
 import com.example.engine.GgufMetadataParser
 import com.example.engine.InferenceConfig
+import com.example.engine.InferenceCallback
+import com.example.engine.LlamaNativeBridge
 import com.example.engine.ProfilePreset
 import com.example.engine.PromptTestCatalog
 import com.example.ui.LLMLabViewModel
@@ -17,6 +19,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -26,6 +29,35 @@ import java.io.ByteArrayInputStream
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
 class ExampleRobolectricTest {
+
+    @Test
+    fun `JVM host never reports simulated model loading or inference`() {
+        Assume.assumeFalse("Test only applies when JNI is unavailable on the Robolectric host.", LlamaNativeBridge.isNativeLibraryLoaded)
+        val bridge = LlamaNativeBridge()
+        val error = arrayOfNulls<String>(1)
+        val loaded = bridge.loadModel(
+            "/does/not/exist/model.gguf",
+            InferenceConfig.fromPreset(ProfilePreset.BALANCED),
+            error
+        )
+        assertFalse(loaded)
+        assertTrue(error[0]?.contains("Native llama.cpp Engine nicht verfügbar") == true)
+
+        val callback = object : InferenceCallback {
+            override fun onToken(tokenText: String, tokenIndex: Int) = Unit
+            override fun onProgress(progressPercent: Float, step: Int) = Unit
+        }
+        val metrics = bridge.executeInference(
+            "Antworte ausschließlich mit OK.",
+            InferenceConfig.fromPreset(ProfilePreset.BALANCED),
+            callback
+        )
+        assertEquals("NATIVE_ERROR", metrics.finishReason)
+        assertEquals(0, metrics.promptTokens)
+        assertEquals(0, metrics.generatedTokens)
+        assertEquals(0f, metrics.tokensPerSecond)
+        bridge.close()
+    }
 
     @Test
     fun `read string from context`() {

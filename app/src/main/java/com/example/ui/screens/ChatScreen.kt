@@ -34,6 +34,7 @@ fun ChatScreen(viewModel: LLMLabViewModel) {
     val listState = rememberLazyListState()
 
     val isGenerating = modelState is ModelLifecycleState.InferenceRunning
+    val isAborting = modelState is ModelLifecycleState.Aborting
     val isModelReady = modelState is ModelLifecycleState.Ready
 
     // Automatisch nach unten scrollen bei neuen Nachrichten
@@ -68,6 +69,7 @@ fun ChatScreen(viewModel: LLMLabViewModel) {
                             .clip(RoundedCornerShape(5.dp))
                             .background(
                                 when {
+                                    isAborting -> LaserCrimson
                                     isGenerating -> NeonCyan
                                     isModelReady -> MatrixGreen
                                     else -> TextMuted
@@ -77,6 +79,7 @@ fun ChatScreen(viewModel: LLMLabViewModel) {
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = when {
+                            isAborting -> "Nativer Abbruch läuft"
                             isGenerating -> "Inferenz aktiv"
                             isModelReady -> "Modell bereit"
                             else -> "Kein Modell bereit"
@@ -101,8 +104,8 @@ fun ChatScreen(viewModel: LLMLabViewModel) {
         }
 
         // Live Inferenz-Banner bei aktiver Generierung
-        if (isGenerating) {
-            val runState = modelState as ModelLifecycleState.InferenceRunning
+        if (isGenerating || isAborting) {
+            val runState = modelState as? ModelLifecycleState.InferenceRunning
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 color = DarkSurfaceVariant,
@@ -123,24 +126,26 @@ fun ChatScreen(viewModel: LLMLabViewModel) {
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Native Tokens: ${runState.tokenCount} | Generierung läuft",
-                            color = NeonCyan,
+                            text = if (isAborting) "Native Abort-Signal gesendet" else "Native Tokens: ${runState?.tokenCount ?: 0} | Generierung läuft",
+                            color = if (isAborting) LaserCrimson else NeonCyan,
                             fontSize = 12.sp,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold
                         )
                     }
 
-                    // Sofortiger Abbruch-Button
-                    Button(
-                        onClick = { viewModel.requestAbort() },
-                        colors = ButtonDefaults.buttonColors(containerColor = LaserCrimson, contentColor = Color.White),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                        modifier = Modifier.testTag("chat_abort_button")
-                    ) {
-                        Icon(imageVector = Icons.Default.Close, contentDescription = null, modifier = Modifier.size(14.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Abbrechen", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    // Während des laufenden nativen Abbruchs keinen zweiten Abbruch auslösen.
+                    if (!isAborting) {
+                        Button(
+                            onClick = { viewModel.requestAbort() },
+                            colors = ButtonDefaults.buttonColors(containerColor = LaserCrimson, contentColor = Color.White),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            modifier = Modifier.testTag("chat_abort_button")
+                        ) {
+                            Icon(imageVector = Icons.Default.Close, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Abbrechen", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }

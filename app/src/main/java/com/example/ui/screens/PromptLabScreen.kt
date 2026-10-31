@@ -116,14 +116,11 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
                     // Metrikzeile
                     labMetrics?.let { m ->
                         Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Eval: ${m.promptEvalDurationMs}ms (${m.promptTokens}T)", color = TextSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                            Text("Gen: ${m.generationDurationMs}ms (${m.generatedTokens}T)", color = TextSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                            Text("${"%.1f".format(m.tokensPerSecond)} Tok/s", color = NeonCyan, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
-                            Text("Status: ${m.finishReason}", color = if (m.finishReason == "STOP_TOKEN") MatrixGreen else LaserCrimson, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Tokenisierung: ${m.promptTokenizeDurationMs} ms | Prompt-Eval: ${m.promptEvalDurationMs} ms (${m.promptTokens} Tokens)", color = TextSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                            Text("First Token: ${m.firstTokenDurationMs} ms | Generierung: ${m.generationDurationMs} ms (${m.generatedTokens} Tokens)", color = TextSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                            Text("Decode Calls: Prompt ${m.promptDecodeCalls} | Generation ${m.generationDecodeCalls} | ${"%.1f".format(m.tokensPerSecond)} Tok/s", color = NeonCyan, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                            Text("Status: ${m.finishReason}", color = if (m.finishReason == "STOP_TOKEN" || m.finishReason == "MAX_TOKENS") MatrixGreen else LaserCrimson, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                         }
                     }
                 }
