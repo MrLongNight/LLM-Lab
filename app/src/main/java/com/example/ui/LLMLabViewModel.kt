@@ -30,9 +30,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
+import java.io.InterruptedIOException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.text.DecimalFormat
 
 data class ChatMessage(
@@ -136,7 +138,10 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     )
 
     private var activeInferenceJob: Job? = null
+    @Volatile private var engineOperationGeneration: Long = 0L
     private var localCachedModelFile: File? = null
+    private var localCachedModelUri: Uri? = null
+    private var lastModelSelection: ModelLifecycleState.ModelSelected? = null
 
     init {
         // Starte periodische Telemetrieerfassung
@@ -145,6 +150,60 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 _telemetry.value = SystemTelemetryManager.capture(getApplication())
                 delay(3000)
             }
+        }
+    }
+
+    /**
+     * Native JNI calls are blocking. A new operation first signals abort to the
+     * previous one and then waits for its JNI call to return before resetting
+     * the native abort flag and starting another operation.
+     */
+    private fun launchEngineOperation(block: suspend () -> Unit) {
+        val generation = ++engineOperationGeneration
+        val previous = activeInferenceJob
+        if (previous?.isActive == true) {
+            nativeBridge.requestAbort()
+        }
+
+        val next = viewModelScope.launch(Dispatchers.IO) {
+            previous?.join()
+            if (generation != engineOperationGeneration) return@launch
+            nativeBridge.prepareForOperation()
+            block()
+        }
+        activeInferenceJob = next
+    }
+
+    private suspend fun executeInferenceWithWatchdog(
+        prompt: String,
+        config: InferenceConfig,
+        callback: InferenceCallback,
+        timeoutSeconds: Int
+    ): NativeMetrics {
+        nativeBridge.prepareForOperation()
+        val timedOut = AtomicBoolean(false)
+        val watchdog = viewModelScope.launch(Dispatchers.Default) {
+            delay(timeoutSeconds.coerceAtLeast(1) * 1000L)
+            timedOut.set(true)
+            _modelState.value = ModelLifecycleState.Aborting
+            nativeBridge.requestAbort()
+        }
+
+        return try {
+            val nativeMetrics = nativeBridge.executeInference(prompt, config, callback)
+            if (timedOut.get()) {
+                nativeMetrics.copy(
+                    finishReason = "TIMEOUT",
+                    errorMessage = listOfNotNull(
+                        "Timeout nach ${timeoutSeconds.coerceAtLeast(1)}s; nativer Abbruch wurde angefordert.",
+                        nativeMetrics.errorMessage
+                    ).joinToString(" ")
+                )
+            } else {
+                nativeMetrics
+            }
+        } finally {
+            watchdog.cancel()
         }
     }
 
@@ -192,15 +251,23 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 }
 
-                // GGUF-Header Metadaten und Magic-Signatur parsen
+                // GGUF-Header und Metadaten vor dem Modellladen prüfen.
                 val ggufInfo = GgufMetadataParser.parse(context, uri, fileSize)
+                if (!ggufInfo.isValid) {
+                    _modelState.value = ModelLifecycleState.Error(
+                        ggufInfo.errorMessage ?: "Ungültige GGUF-Datei"
+                    )
+                    return@launch
+                }
 
-                _modelState.value = ModelLifecycleState.ModelSelected(
+                val selected = ModelLifecycleState.ModelSelected(
                     uri = uri,
                     fileName = fileName,
                     fileSizeBytes = fileSize,
                     ggufInfo = ggufInfo
                 )
+                lastModelSelection = selected
+                _modelState.value = selected
             } catch (e: Exception) {
                 _modelState.value = ModelLifecycleState.Error("Fehler bei Modellauswahl: ${e.message}")
             }
@@ -208,91 +275,158 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun initializeModel() {
-        val selected = _modelState.value as? ModelLifecycleState.ModelSelected ?: return
+        val selected = lastModelSelection
+            ?: (_modelState.value as? ModelLifecycleState.ModelSelected)
+            ?: return
 
-        activeInferenceJob?.cancel()
-        activeInferenceJob = viewModelScope.launch(Dispatchers.IO) {
+        launchEngineOperation {
             val startTime = System.currentTimeMillis()
-            _modelState.value = ModelLifecycleState.Initializing(5f, "Kopiere GGUF in lokalen App-Speicher...", 0)
-
-            val timeoutMs = _config.value.timeoutInitSec * 1000L
-            val result = withTimeoutOrNull(timeoutMs) {
-                try {
-                    val context = getApplication<Application>()
-                    // Für direkten JNI/POSIX fopen Pfad kopieren wir oder verlinken die Datei im Cache
-                    val cacheModel = File(context.cacheDir, "active_model.gguf")
-                    if (!cacheModel.exists() || cacheModel.length() != selected.fileSizeBytes) {
-                        _modelState.value = ModelLifecycleState.Initializing(20f, "Streaming von Dateideskriptor...", 200)
-                        context.contentResolver.openInputStream(selected.uri)?.use { input ->
-                            FileOutputStream(cacheModel).use { output ->
-                                val buffer = ByteArray(1024 * 512)
-                                var read: Int
-                                var totalCopied = 0L
-                                while (input.read(buffer).also { read = it } != -1) {
-                                    output.write(buffer, 0, read)
-                                    totalCopied += read
-                                    if (selected.fileSizeBytes > 0) {
-                                        val pct = 20f + (totalCopied.toFloat() / selected.fileSizeBytes) * 60f
-                                        _modelState.value = ModelLifecycleState.Initializing(
-                                            pct,
-                                            "Übertrage ${totalCopied / (1024 * 1024)} MB...",
-                                            System.currentTimeMillis() - startTime
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    localCachedModelFile = cacheModel
-
-                    _modelState.value = ModelLifecycleState.Initializing(85f, "Initialisiere native llama.cpp Engine...", System.currentTimeMillis() - startTime)
-
-                    val outError = arrayOfNulls<String>(1)
-                    val loadSuccess = nativeBridge.loadModel(cacheModel.absolutePath, _config.value, outError)
-
-                    if (!loadSuccess) {
-                        ModelLifecycleState.Error(outError[0] ?: "Native Modellinitialisierung fehlgeschlagen")
-                    } else {
-                        val initDuration = System.currentTimeMillis() - startTime
-                        ModelLifecycleState.Ready(
-                            fileName = selected.fileName,
-                            fileSizeBytes = selected.fileSizeBytes,
-                            ggufInfo = selected.ggufInfo,
-                            initDurationMs = initDuration,
-                            engineVersion = nativeBridge.getEngineVersion()
-                        )
-                    }
-                } catch (e: Exception) {
-                    ModelLifecycleState.Error("Initialisierungsfehler: ${e.message}")
-                }
+            val timeoutSeconds = _config.value.timeoutInitSec.coerceAtLeast(1)
+            val timedOut = AtomicBoolean(false)
+            val watchdog = viewModelScope.launch(Dispatchers.Default) {
+                delay(timeoutSeconds * 1000L)
+                timedOut.set(true)
+                _modelState.value = ModelLifecycleState.Aborting
+                nativeBridge.requestAbort()
             }
 
-            if (result == null) {
-                nativeBridge.requestAbort()
-                _modelState.value = ModelLifecycleState.Error("Timeout: Modellinitialisierung überschritt ${_config.value.timeoutInitSec}s")
-            } else {
-                _modelState.value = result
+            try {
+                _modelState.value = ModelLifecycleState.Initializing(
+                    5f, "Bereite GGUF-Datei für native Engine vor...", 0
+                )
+
+                val context = getApplication<Application>()
+                // filesDir statt cacheDir: Das Betriebssystem darf das große Modell
+                // nicht wie einen entbehrlichen Cache-Eintrag entfernen.
+                val cacheModel = File(context.filesDir, "active_model.gguf")
+                val cachePart = File(context.filesDir, "active_model.gguf.part")
+                val canReuse = localCachedModelUri == selected.uri &&
+                    cacheModel.isFile &&
+                    (selected.fileSizeBytes <= 0L || cacheModel.length() == selected.fileSizeBytes)
+
+                if (!canReuse) {
+                    cachePart.delete()
+                    _modelState.value = ModelLifecycleState.Initializing(
+                        10f, "Kopiere GGUF in den internen App-Speicher...", 0
+                    )
+                    val input = context.contentResolver.openInputStream(selected.uri)
+                        ?: throw IOException("Die ausgewählte GGUF-Datei konnte nicht geöffnet werden.")
+
+                    var totalCopied = 0L
+                    input.use { source ->
+                        FileOutputStream(cachePart).use { output ->
+                            val buffer = ByteArray(512 * 1024)
+                            while (true) {
+                                if (timedOut.get() || nativeBridge.isAbortRequested()) {
+                                    throw InterruptedIOException("Kopiervorgang durch Timeout oder Nutzer abgebrochen.")
+                                }
+                                val read = source.read(buffer)
+                                if (read < 0) break
+                                output.write(buffer, 0, read)
+                                totalCopied += read
+                                val percent = if (selected.fileSizeBytes > 0L) {
+                                    (10f + 70f * totalCopied.toFloat() / selected.fileSizeBytes.toFloat()).coerceIn(10f, 80f)
+                                } else {
+                                    10f
+                                }
+                                _modelState.value = ModelLifecycleState.Initializing(
+                                    percent,
+                                    "Kopiere \${totalCopied / (1024 * 1024)} MB...",
+                                    System.currentTimeMillis() - startTime
+                                )
+                            }
+                            output.fd.sync()
+                        }
+                    }
+
+                    if (timedOut.get() || nativeBridge.isAbortRequested()) {
+                        throw InterruptedIOException("Kopiervorgang abgebrochen.")
+                    }
+                    if (totalCopied <= 0L) {
+                        throw IOException("Die ausgewählte GGUF-Datei ist leer.")
+                    }
+                    if (selected.fileSizeBytes > 0L && totalCopied != selected.fileSizeBytes) {
+                        throw IOException(
+                            "Unvollständige Modellkopie: \${totalCopied} von \${selected.fileSizeBytes} Bytes."
+                        )
+                    }
+
+                    if (cacheModel.exists() && !cacheModel.delete()) {
+                        throw IOException("Vorhandene Modellkopie konnte nicht ersetzt werden.")
+                    }
+                    if (!cachePart.renameTo(cacheModel)) {
+                        cachePart.copyTo(cacheModel, overwrite = true)
+                        cachePart.delete()
+                    }
+                }
+
+                if (timedOut.get() || nativeBridge.isAbortRequested()) {
+                    throw InterruptedIOException("Modellinitialisierung vor dem nativen Laden abgebrochen.")
+                }
+                if (!cacheModel.isFile || cacheModel.length() <= 0L) {
+                    throw IOException("Die lokale Modellkopie ist nicht vollständig vorhanden.")
+                }
+
+                localCachedModelFile = cacheModel
+                localCachedModelUri = selected.uri
+
+                _modelState.value = ModelLifecycleState.Initializing(
+                    85f, "Lade Modell und erstelle llama.cpp Context...", System.currentTimeMillis() - startTime
+                )
+
+                val outError = arrayOfNulls<String>(1)
+                val loadSuccess = nativeBridge.loadModel(cacheModel.absolutePath, _config.value, outError)
+
+                if (timedOut.get() || nativeBridge.isAbortRequested()) {
+                    if (loadSuccess) nativeBridge.unloadModel()
+                    _modelState.value = ModelLifecycleState.Error(
+                        if (timedOut.get()) "TIMEOUT: Modellinitialisierung überschritt \${timeoutSeconds}s."
+                        else "Modellinitialisierung wurde abgebrochen."
+                    )
+                } else if (!loadSuccess) {
+                    _modelState.value = ModelLifecycleState.Error(
+                        outError[0] ?: "Native llama.cpp Modellinitialisierung fehlgeschlagen."
+                    )
+                } else {
+                    _modelState.value = ModelLifecycleState.Ready(
+                        fileName = selected.fileName,
+                        fileSizeBytes = cacheModel.length(),
+                        ggufInfo = selected.ggufInfo,
+                        initDurationMs = System.currentTimeMillis() - startTime,
+                        engineVersion = nativeBridge.getEngineVersion()
+                    )
+                }
+            } catch (e: Exception) {
+                cachePartSafeDelete(context = getApplication(), fileName = "active_model.gguf.part")
+                val message = when {
+                    timedOut.get() -> "TIMEOUT: Modellinitialisierung überschritt \${timeoutSeconds}s."
+                    nativeBridge.isAbortRequested() -> "Modellinitialisierung wurde durch den Nutzer abgebrochen."
+                    else -> "Initialisierungsfehler: \${e.message}"
+                }
+                _modelState.value = ModelLifecycleState.Error(message)
+            } finally {
+                watchdog.cancel()
             }
         }
     }
 
     fun unloadModel() {
-        viewModelScope.launch(Dispatchers.IO) {
+        launchEngineOperation {
             _modelState.value = ModelLifecycleState.Aborting
             nativeBridge.unloadModel()
-            delay(150)
-            _modelState.value = ModelLifecycleState.Unloaded
+            _modelState.value = lastModelSelection ?: ModelLifecycleState.Unloaded
         }
     }
 
     // ----------------- INFERENZ & CHAT -----------------
 
     fun sendChatMessage(promptText: String) {
+        if (promptText.isBlank()) return
         val readyState = _modelState.value as? ModelLifecycleState.Ready
         if (readyState == null) {
             _chatMessages.value = _chatMessages.value + ChatMessage(
                 isUser = false,
-                text = "Fehler: Kein Modell geladen. Bitte initialisiere zuerst das GGUF-Modell."
+                text = "Fehler: Kein vollständig geladenes natives Modell. Bitte initialisiere das GGUF-Modell."
             )
             return
         }
@@ -302,19 +436,14 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
         val assistantPlaceholder = ChatMessage(
             id = assistantPlaceholderId,
             isUser = false,
-            text = "Denke nach...",
+            text = "Native Inferenz wird gestartet...",
             isStreaming = true
         )
-
         _chatMessages.value = _chatMessages.value + userMsg + assistantPlaceholder
 
         val currentConfig = _config.value
-        val timeoutMs = currentConfig.timeoutNormalInferenceSec * 1000L
-
-        activeInferenceJob?.cancel()
-        activeInferenceJob = viewModelScope.launch(Dispatchers.IO) {
-            val startTime = System.currentTimeMillis()
-            var streamedResponse = ""
+        launchEngineOperation {
+            var streamedResponse = StringBuilder()
             var tokenCounter = 0
 
             _modelState.value = ModelLifecycleState.InferenceRunning(
@@ -325,67 +454,57 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 elapsedMs = 0
             )
 
+            val startTime = System.currentTimeMillis()
             val callback = object : InferenceCallback {
                 override fun onToken(tokenText: String, tokenIndex: Int) {
-                    streamedResponse += tokenText
-                    tokenCounter++
-                    val elapsed = (System.currentTimeMillis() - startTime).coerceAtLeast(1)
-                    val tps = (tokenCounter * 1000f) / elapsed
-
+                    streamedResponse.append(tokenText)
+                    tokenCounter = tokenIndex + 1
+                    val elapsed = System.currentTimeMillis() - startTime
                     _modelState.value = ModelLifecycleState.InferenceRunning(
                         prompt = promptText,
-                        streamingText = streamedResponse,
+                        streamingText = streamedResponse.toString(),
                         tokenCount = tokenCounter,
-                        tps = tps,
+                        tps = 0f,
                         elapsedMs = elapsed
                     )
-
-                    // Chatnachricht live updaten
-                    _chatMessages.value = _chatMessages.value.map { msg ->
-                        if (msg.id == assistantPlaceholderId) {
-                            msg.copy(text = streamedResponse, isStreaming = true)
-                        } else msg
+                    _chatMessages.value = _chatMessages.value.map { message ->
+                        if (message.id == assistantPlaceholderId) {
+                            message.copy(text = streamedResponse.toString(), isStreaming = true)
+                        } else message
                     }
                 }
 
                 override fun onProgress(progressPercent: Float, step: Int) {
-                    // Prompt-Eval Fortschritt
+                    // Der Fortschritt wird aus nativen Prompt-Decode-Rückmeldungen geliefert.
+                    // Das UI zeigt ihn erst an, wenn ein eigenes Prompt-Eval-State-Feld vorhanden ist.
                 }
             }
 
-            val metricsResult = withTimeoutOrNull(timeoutMs) {
-                nativeBridge.executeInference(promptText, currentConfig, callback)
-            }
-
-            val finalMetrics = metricsResult ?: NativeMetrics(
-                promptTokens = promptText.length / 4,
-                generatedTokens = tokenCounter,
-                promptEvalDurationMs = 0,
-                generationDurationMs = System.currentTimeMillis() - startTime,
-                totalDurationMs = System.currentTimeMillis() - startTime,
-                decodeCalls = tokenCounter,
-                tokensPerSecond = if (tokenCounter > 0) (tokenCounter * 1000f) / (System.currentTimeMillis() - startTime) else 0f,
-                finishReason = "TIMEOUT",
-                errorMessage = "Inferenz-Timeout nach ${currentConfig.timeoutNormalInferenceSec}s überschritten"
+            val finalMetrics = executeInferenceWithWatchdog(
+                prompt = promptText,
+                config = currentConfig,
+                callback = callback,
+                timeoutSeconds = currentConfig.timeoutNormalInferenceSec
             )
+            val response = streamedResponse.toString()
 
-            // Chatnachricht finalisieren
-            _chatMessages.value = _chatMessages.value.map { msg ->
-                if (msg.id == assistantPlaceholderId) {
-                    msg.copy(
-                        text = if (streamedResponse.isEmpty()) (finalMetrics.errorMessage ?: "Keine Antwort erhalten") else streamedResponse,
+            _chatMessages.value = _chatMessages.value.map { message ->
+                if (message.id == assistantPlaceholderId) {
+                    message.copy(
+                        text = if (response.isEmpty()) (finalMetrics.errorMessage ?: "Keine Modellantwort erhalten.") else response,
                         metrics = finalMetrics,
                         isStreaming = false
                     )
-                } else msg
+                } else message
             }
 
-            // In Room Datenbank protokollieren
-            val testRun = TestRunEntity(
+            // Chat-Inhalte sind potenziell personenbezogen und werden nicht in
+            // Diagnosehistorie oder Export übernommen.
+            dao.insertRun(TestRunEntity(
                 testCategory = "CHAT",
-                testTitle = "Chat Inferenz",
-                promptText = promptText,
-                responseText = streamedResponse,
+                testTitle = "Chat Inferenz (Inhalt redigiert)",
+                promptText = "[CHAT_PROMPT_REDACTED; chars=\${promptText.length}]",
+                responseText = "[CHAT_RESPONSE_REDACTED; chars=\${response.length}]",
                 promptTokens = finalMetrics.promptTokens,
                 generatedTokens = finalMetrics.generatedTokens,
                 promptEvalDurationMs = finalMetrics.promptEvalDurationMs,
@@ -399,38 +518,35 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 finishReason = finalMetrics.finishReason,
                 isSuccess = finalMetrics.finishReason == "STOP_TOKEN" || finalMetrics.finishReason == "MAX_TOKENS",
                 errorMessage = finalMetrics.errorMessage,
-                javaHeapBytes = (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()),
+                javaHeapBytes = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory(),
                 nativeHeapBytes = nativeBridge.getAllocatedHeap(),
-                modelName = readyState.fileName
-            )
-            dao.insertRun(testRun)
+                modelName = readyState.fileName,
+                promptTokenizeDurationMs = finalMetrics.promptTokenizeDurationMs,
+                firstTokenDurationMs = finalMetrics.firstTokenDurationMs,
+                promptDecodeCalls = finalMetrics.promptDecodeCalls,
+                generationDecodeCalls = finalMetrics.generationDecodeCalls
+            ))
 
-            // Modellstatus zurück auf Ready
-            _modelState.value = readyState
+            if (finalMetrics.finishReason == "NATIVE_ERROR") {
+                nativeBridge.unloadModel()
+                _modelState.value = ModelLifecycleState.Error(
+                    finalMetrics.errorMessage ?: "Native Inferenzfehler; Modell wurde aus Sicherheitsgründen entladen."
+                )
+            } else {
+                _modelState.value = readyState
+            }
         }
     }
 
     fun requestAbort() {
-        viewModelScope.launch(Dispatchers.IO) {
+        if (activeInferenceJob?.isActive == true) {
+            // Das Signal läuft unabhängig vom Coroutine-Thread direkt zum nativen
+            // Abort-Flag und wird dort während llama_decode geprüft.
             _modelState.value = ModelLifecycleState.Aborting
             nativeBridge.requestAbort()
-            activeInferenceJob?.cancel()
-            delay(100)
-            val ready = _modelState.value as? ModelLifecycleState.Ready
-            if (ready != null) {
-                _modelState.value = ready
-            } else if (localCachedModelFile?.exists() == true) {
-                _modelState.value = ModelLifecycleState.Ready(
-                    fileName = localCachedModelFile?.name ?: "Modell",
-                    fileSizeBytes = localCachedModelFile?.length() ?: 0L,
-                    ggufInfo = GgufInfo(isValid = true, magic = "GGUF", version = 3, tensorCount = 0, kvCount = 0),
-                    initDurationMs = 0,
-                    engineVersion = nativeBridge.getEngineVersion()
-                )
-            } else {
-                _modelState.value = ModelLifecycleState.Unloaded
-            }
         }
+        // Kein Job.cancel(): Ein blockierender JNI-Aufruf wird nur durch das
+        // native Abort-Signal beendet. Die Operation räumt sich selbst auf.
     }
 
     fun resetChat() {
@@ -446,56 +562,56 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
 
     fun runLabTest(testCase: PromptTestCase) {
         val readyState = _modelState.value as? ModelLifecycleState.Ready ?: return
-        _labActiveTest.value = testCase
-        _labTestOutput.value = "Testlauf gestartet..."
-        _labMetrics.value = null
 
-        activeInferenceJob?.cancel()
-        activeInferenceJob = viewModelScope.launch(Dispatchers.IO) {
+        launchEngineOperation {
+            _labActiveTest.value = testCase
+            _labTestOutput.value = "Testlauf gestartet..."
+            _labMetrics.value = null
+
             val isShortTest = testCase.id == "TEST_1_OK"
-            val timeoutSec = if (isShortTest) _config.value.timeoutShortTestSec else testCase.timeoutSec
-            val timeoutMs = timeoutSec * 1000L
+            val timeoutSeconds = if (isShortTest) {
+                _config.value.timeoutShortTestSec
+            } else {
+                testCase.timeoutSec
+            }
 
-            for (rep in 1..testCase.repetitionCount) {
-                var localStream = ""
-                val startTime = System.currentTimeMillis()
-
+            for (repetition in 1..testCase.repetitionCount) {
+                val localStream = StringBuilder()
                 val callback = object : InferenceCallback {
                     override fun onToken(tokenText: String, tokenIndex: Int) {
-                        localStream += tokenText
+                        localStream.append(tokenText)
                         _labTestOutput.value = if (testCase.repetitionCount > 1) {
-                            "Wiederholung $rep / ${testCase.repetitionCount}:\n$localStream"
-                        } else localStream
+                            "Wiederholung $repetition / \${testCase.repetitionCount}:\n\${localStream}"
+                        } else {
+                            localStream.toString()
+                        }
                     }
 
                     override fun onProgress(progressPercent: Float, step: Int) {
-                        // Progress
+                        // Fortschritt stammt aus llama.cpp Prompt-Decode-Callbacks.
                     }
                 }
 
-                val metrics = withTimeoutOrNull(timeoutMs) {
-                    nativeBridge.executeInference(testCase.prompt, _config.value, callback)
-                } ?: NativeMetrics(
-                    promptTokens = testCase.prompt.length / 4,
-                    generatedTokens = 0,
-                    promptEvalDurationMs = 0,
-                    generationDurationMs = System.currentTimeMillis() - startTime,
-                    totalDurationMs = System.currentTimeMillis() - startTime,
-                    decodeCalls = 0,
-                    tokensPerSecond = 0f,
-                    finishReason = "TIMEOUT",
-                    errorMessage = "Timeout nach ${timeoutSec}s"
+                val metrics = executeInferenceWithWatchdog(
+                    prompt = testCase.prompt,
+                    config = _config.value,
+                    callback = callback,
+                    timeoutSeconds = timeoutSeconds
                 )
-
                 _labMetrics.value = metrics
 
-                // Room Persistenz
-                val isSuccess = metrics.finishReason == "STOP_TOKEN" || metrics.finishReason == "MAX_TOKENS"
+                val succeeded = metrics.finishReason == "STOP_TOKEN" ||
+                    metrics.finishReason == "MAX_TOKENS"
+
                 dao.insertRun(TestRunEntity(
                     testCategory = testCase.id,
-                    testTitle = if (testCase.repetitionCount > 1) "${testCase.title} (#$rep)" else testCase.title,
+                    testTitle = if (testCase.repetitionCount > 1) {
+                        "\${testCase.title} (#$repetition)"
+                    } else {
+                        testCase.title
+                    },
                     promptText = testCase.prompt,
-                    responseText = localStream,
+                    responseText = localStream.toString(),
                     promptTokens = metrics.promptTokens,
                     generatedTokens = metrics.generatedTokens,
                     promptEvalDurationMs = metrics.promptEvalDurationMs,
@@ -507,13 +623,31 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     nUbatch = _config.value.nUbatch,
                     nThreads = _config.value.nThreads,
                     finishReason = metrics.finishReason,
-                    isSuccess = isSuccess,
+                    isSuccess = succeeded,
                     errorMessage = metrics.errorMessage,
-                    modelName = readyState.fileName
+                    modelName = readyState.fileName,
+                    promptTokenizeDurationMs = metrics.promptTokenizeDurationMs,
+                    firstTokenDurationMs = metrics.firstTokenDurationMs,
+                    promptDecodeCalls = metrics.promptDecodeCalls,
+                    generationDecodeCalls = metrics.generationDecodeCalls
                 ))
 
-                if (nativeBridge.isAbortRequested()) break
+                if (!succeeded) {
+                    if (metrics.finishReason == "NATIVE_ERROR") {
+                        nativeBridge.unloadModel()
+                        _modelState.value = ModelLifecycleState.Error(
+                            metrics.errorMessage ?: "Native Engine-Fehler"
+                        )
+                    } else {
+                        _modelState.value = readyState
+                    }
+                    if (localStream.isEmpty()) {
+                        _labTestOutput.value = "Keine Antwort. Status: \${metrics.finishReason}\n\${metrics.errorMessage.orEmpty()}"
+                    }
+                    break
+                }
             }
+
             _labActiveTest.value = null
         }
     }
@@ -523,13 +657,13 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     fun run20xBenchmark() {
         val readyState = _modelState.value as? ModelLifecycleState.Ready ?: return
 
-        activeInferenceJob?.cancel()
-        activeInferenceJob = viewModelScope.launch(Dispatchers.IO) {
+        launchEngineOperation {
             val prompt = "Antworte ausschließlich mit OK."
+            val config = _config.value
             val durations = mutableListOf<Long>()
-            var successCount = 0
-            var errorCount = 0
-            var timeoutCount = 0
+            var successfulRuns = 0
+            var failedRuns = 0
+            var timeoutRuns = 0
             var tpsSum = 0f
 
             _benchmarkSummary.value = BenchmarkSummary(
@@ -538,141 +672,112 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 currentIteration = 0
             )
 
-            val timeoutMs = _config.value.timeoutStressTestSec * 1000L
-
-            for (i in 1..20) {
-                if (nativeBridge.isAbortRequested()) {
-                    _benchmarkSummary.value = _benchmarkSummary.value.copy(
-                        isRunning = false,
-                        stopReason = "Durch Nutzer abgebrochen"
-                    )
-                    break
-                }
-
+            var stopReason: String? = null
+            for (iteration in 1..20) {
                 _benchmarkSummary.value = _benchmarkSummary.value.copy(
-                    currentIteration = i
+                    currentIteration = iteration
                 )
-
-                val startTime = System.currentTimeMillis()
-                var collectedText = ""
-
+                val collectedText = StringBuilder()
                 val callback = object : InferenceCallback {
                     override fun onToken(tokenText: String, tokenIndex: Int) {
-                        collectedText += tokenText
+                        collectedText.append(tokenText)
                     }
-                    override fun onProgress(progressPercent: Float, step: Int) {}
+                    override fun onProgress(progressPercent: Float, step: Int) {
+                        // Native Prompt-Eval Progress Callback.
+                    }
                 }
 
-                val metrics = withTimeoutOrNull(timeoutMs) {
-                    nativeBridge.executeInference(prompt, _config.value, callback)
-                }
+                val metrics = executeInferenceWithWatchdog(
+                    prompt = prompt,
+                    config = config,
+                    callback = callback,
+                    timeoutSeconds = config.timeoutStressTestSec
+                )
+                val succeeded = metrics.finishReason == "STOP_TOKEN" ||
+                    metrics.finishReason == "MAX_TOKENS"
 
-                if (metrics == null) {
-                    timeoutCount++
-                    errorCount++
-                    dao.insertRun(TestRunEntity(
-                        testCategory = "BENCHMARK_STRESS",
-                        testTitle = "Stresstest Durchlauf #$i / 20",
-                        promptText = prompt,
-                        responseText = collectedText,
-                        promptTokens = prompt.length / 4,
-                        generatedTokens = 0,
-                        promptEvalDurationMs = 0,
-                        generationDurationMs = timeoutMs,
-                        tokensPerSecond = 0f,
-                        totalDurationMs = timeoutMs,
-                        nCtx = _config.value.nCtx,
-                        nBatch = _config.value.nBatch,
-                        nUbatch = _config.value.nUbatch,
-                        nThreads = _config.value.nThreads,
-                        finishReason = "TIMEOUT",
-                        isSuccess = false,
-                        errorMessage = "Timeout nach ${_config.value.timeoutStressTestSec}s",
-                        modelName = readyState.fileName
-                    ))
-                    // Auto-Stop bei 3 Timeouts hintereinander
-                    if (timeoutCount >= 3) {
-                        _benchmarkSummary.value = _benchmarkSummary.value.copy(
-                            isRunning = false,
-                            stopReason = "Auto-Stop: Zu viele Timeouts hintereinander"
-                        )
-                        break
+                dao.insertRun(TestRunEntity(
+                    testCategory = "BENCHMARK_STRESS",
+                    testTitle = "Stresstest Durchlauf #$iteration / 20",
+                    promptText = prompt,
+                    responseText = collectedText.toString(),
+                    promptTokens = metrics.promptTokens,
+                    generatedTokens = metrics.generatedTokens,
+                    promptEvalDurationMs = metrics.promptEvalDurationMs,
+                    generationDurationMs = metrics.generationDurationMs,
+                    tokensPerSecond = metrics.tokensPerSecond,
+                    totalDurationMs = metrics.totalDurationMs,
+                    nCtx = config.nCtx,
+                    nBatch = config.nBatch,
+                    nUbatch = config.nUbatch,
+                    nThreads = config.nThreads,
+                    finishReason = metrics.finishReason,
+                    isSuccess = succeeded,
+                    errorMessage = metrics.errorMessage,
+                    modelName = readyState.fileName,
+                    promptTokenizeDurationMs = metrics.promptTokenizeDurationMs,
+                    firstTokenDurationMs = metrics.firstTokenDurationMs,
+                    promptDecodeCalls = metrics.promptDecodeCalls,
+                    generationDecodeCalls = metrics.generationDecodeCalls
+                ))
+
+                if (!succeeded) {
+                    failedRuns++
+                    when (metrics.finishReason) {
+                        "TIMEOUT" -> {
+                            timeoutRuns++
+                            stopReason = "Auto-Stop: Timeout nach \${config.timeoutStressTestSec}s; nativer Abbruch wurde ausgelöst."
+                        }
+                        "ABORTED_BY_USER" -> {
+                            stopReason = "Durch Nutzer abgebrochen."
+                        }
+                        else -> {
+                            stopReason = "Auto-Stop: Native Engine-Fehler: \${metrics.errorMessage ?: metrics.finishReason}"
+                            if (metrics.finishReason == "NATIVE_ERROR") {
+                                nativeBridge.unloadModel()
+                                _modelState.value = ModelLifecycleState.Error(
+                                    metrics.errorMessage ?: "Native Engine-Fehler"
+                                )
+                            }
+                        }
                     }
-                } else if (metrics.finishReason == "NATIVE_ERROR") {
-                    errorCount++
-                    dao.insertRun(TestRunEntity(
-                        testCategory = "BENCHMARK_STRESS",
-                        testTitle = "Stresstest Durchlauf #$i / 20",
-                        promptText = prompt,
-                        responseText = collectedText,
-                        promptTokens = metrics.promptTokens,
-                        generatedTokens = metrics.generatedTokens,
-                        promptEvalDurationMs = metrics.promptEvalDurationMs,
-                        generationDurationMs = metrics.generationDurationMs,
-                        tokensPerSecond = metrics.tokensPerSecond,
-                        totalDurationMs = metrics.totalDurationMs,
-                        nCtx = _config.value.nCtx,
-                        nBatch = _config.value.nBatch,
-                        nUbatch = _config.value.nUbatch,
-                        nThreads = _config.value.nThreads,
-                        finishReason = "NATIVE_ERROR",
-                        isSuccess = false,
-                        errorMessage = metrics.errorMessage,
-                        modelName = readyState.fileName
-                    ))
-                    // Auto-Stop bei nicht behebbarem nativem Fehler
-                    _benchmarkSummary.value = _benchmarkSummary.value.copy(
-                        isRunning = false,
-                        stopReason = "Auto-Stop: Nicht behebbarer nativer Engine-Fehler: ${metrics.errorMessage}"
-                    )
                     break
-                } else {
-                    successCount++
-                    durations.add(metrics.totalDurationMs)
-                    tpsSum += metrics.tokensPerSecond
-
-                    dao.insertRun(TestRunEntity(
-                        testCategory = "BENCHMARK_STRESS",
-                        testTitle = "Stresstest Durchlauf #$i / 20",
-                        promptText = prompt,
-                        responseText = collectedText,
-                        promptTokens = metrics.promptTokens,
-                        generatedTokens = metrics.generatedTokens,
-                        promptEvalDurationMs = metrics.promptEvalDurationMs,
-                        generationDurationMs = metrics.generationDurationMs,
-                        tokensPerSecond = metrics.tokensPerSecond,
-                        totalDurationMs = metrics.totalDurationMs,
-                        nCtx = _config.value.nCtx,
-                        nBatch = _config.value.nBatch,
-                        nUbatch = _config.value.nUbatch,
-                        nThreads = _config.value.nThreads,
-                        finishReason = metrics.finishReason,
-                        isSuccess = true,
-                        modelName = readyState.fileName
-                    ))
                 }
 
-                // Statistiken berechnen
-                durations.sort()
-                val avgDuration = if (durations.isNotEmpty()) durations.average().toLong() else 0L
-                val p50 = if (durations.isNotEmpty()) durations[durations.size / 2] else 0L
-                val p95 = if (durations.isNotEmpty()) durations[minOf((durations.size * 0.95).toInt(), durations.size - 1)] else 0L
-                val avgTps = if (successCount > 0) tpsSum / successCount else 0f
+                successfulRuns++
+                durations.add(metrics.totalDurationMs)
+                tpsSum += metrics.tokensPerSecond
+
+                val sortedDurations = durations.sorted()
+                val averageDuration = sortedDurations.average().toLong()
+                val p50Index = ((sortedDurations.size * 0.50).toInt()).coerceIn(0, sortedDurations.lastIndex)
+                val p95Index = (kotlin.math.ceil(sortedDurations.size * 0.95).toInt() - 1)
+                    .coerceIn(0, sortedDurations.lastIndex)
 
                 _benchmarkSummary.value = _benchmarkSummary.value.copy(
-                    successfulRuns = successCount,
-                    failedRuns = errorCount,
-                    timeoutRuns = timeoutCount,
-                    avgDurationMs = avgDuration,
-                    p50DurationMs = p50,
-                    p95DurationMs = p95,
-                    avgTps = avgTps
+                    successfulRuns = successfulRuns,
+                    failedRuns = failedRuns,
+                    timeoutRuns = timeoutRuns,
+                    avgDurationMs = averageDuration,
+                    p50DurationMs = sortedDurations[p50Index],
+                    p95DurationMs = sortedDurations[p95Index],
+                    avgTps = tpsSum / successfulRuns
                 )
 
                 delay(50)
             }
 
-            _benchmarkSummary.value = _benchmarkSummary.value.copy(isRunning = false)
+            _benchmarkSummary.value = _benchmarkSummary.value.copy(
+                successfulRuns = successfulRuns,
+                failedRuns = failedRuns,
+                timeoutRuns = timeoutRuns,
+                isRunning = false,
+                stopReason = stopReason
+            )
+
+            if (_modelState.value !is ModelLifecycleState.Error) {
+                _modelState.value = readyState
+            }
         }
     }
 

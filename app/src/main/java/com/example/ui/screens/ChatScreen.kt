@@ -123,7 +123,7 @@ fun ChatScreen(viewModel: LLMLabViewModel) {
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Tokens: ${runState.tokenCount} | ${"%.1f".format(runState.tps)} Tok/s",
+                            text = "Native Tokens: ${runState.tokenCount} | Generierung läuft",
                             color = NeonCyan,
                             fontSize = 12.sp,
                             fontFamily = FontFamily.Monospace,

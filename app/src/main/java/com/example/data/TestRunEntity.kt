@@ -27,5 +27,9 @@ data class TestRunEntity(
     val errorMessage: String? = null,
     val javaHeapBytes: Long = 0,
     val nativeHeapBytes: Long = 0,
-    val modelName: String = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+    val modelName: String = "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+    val promptTokenizeDurationMs: Long = 0,
+    val firstTokenDurationMs: Long = 0,
+    val promptDecodeCalls: Int = 0,
+    val generationDecodeCalls: Int = 0
 )
