@@ -25,7 +25,9 @@ object ExportManager {
         modelName: String,
         modelSizeFormatted: String,
         modelInfo: GgufInfo? = null,
-        modelStatus: String = "UNKNOWN"
+        modelStatus: String = "UNKNOWN",
+        backendInfo: List<NativeBackendInfo> = emptyList(),
+        activeBackendName: String = "Nicht verfügbar"
     ): String {
         val root = JSONObject()
         val nowStr = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.GERMANY).format(Date())
@@ -34,6 +36,18 @@ object ExportManager {
         root.put("appVersion", BuildConfig.VERSION_NAME)
         root.put("buildCommit", BuildConfig.GIT_COMMIT)
         root.put("modelStatus", modelStatus)
+        root.put("activeBackendSelection", activeBackendName)
+        val backendArray = JSONArray()
+        backendInfo.forEach { backend ->
+            backendArray.put(JSONObject().apply {
+                put("registryName", backend.registryName)
+                put("runtimeName", backend.runtimeName)
+                put("kind", backend.kind)
+                put("bufferType", backend.bufferType)
+                put("available", backend.available)
+            })
+        }
+        root.put("backendRegistry", backendArray)
         root.put("androidVersion", "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
         root.put("deviceModel", "${Build.MANUFACTURER} ${Build.MODEL}")
         root.put("cpuArch", telemetry.cpuArch)
@@ -60,6 +74,11 @@ object ExportManager {
         params.put("n_batch", config.nBatch)
         params.put("n_ubatch", config.nUbatch)
         params.put("n_threads", config.nThreads)
+        params.put("n_threads_batch", config.nThreadsBatch)
+        params.put("backend_preference", config.backendPreference.name)
+        params.put("temperature", config.temperature)
+        params.put("top_k", config.topK)
+        params.put("top_p", config.topP)
         params.put("temperature", config.temperature)
         params.put("max_tokens", config.maxTokens)
         params.put("timeout_init_sec", config.timeoutInitSec)
@@ -99,6 +118,12 @@ object ExportManager {
             obj.put("finishReason", r.finishReason)
             obj.put("isSuccess", r.isSuccess)
             obj.put("errorMessage", r.errorMessage ?: JSONObject.NULL)
+            obj.put("nThreadsBatch", r.nThreadsBatch)
+            obj.put("backendPreference", r.backendPreference)
+            obj.put("activeBackend", r.activeBackend)
+            obj.put("temperature", r.temperature)
+            obj.put("topK", r.topK)
+            obj.put("topP", r.topP)
             runsArray.put(obj)
         }
         root.put("testResults", runsArray)
@@ -115,7 +140,9 @@ object ExportManager {
         modelName: String,
         modelSizeFormatted: String,
         modelInfo: GgufInfo? = null,
-        modelStatus: String = "UNKNOWN"
+        modelStatus: String = "UNKNOWN",
+        backendInfo: List<NativeBackendInfo> = emptyList(),
+        activeBackendName: String = "Nicht verfügbar"
     ): String {
         val sb = StringBuilder()
         val nowStr = SimpleDateFormat("dd.MM.yyyy HH:mm:ss", Locale.GERMANY).format(Date())
@@ -127,6 +154,8 @@ object ExportManager {
         sb.appendLine("App-Version          : ${BuildConfig.VERSION_NAME} (Mobile Inference Testbench)")
         sb.appendLine("Build-Commit         : ${BuildConfig.GIT_COMMIT}")
         sb.appendLine("Modellstatus         : $modelStatus")
+        sb.appendLine("Backend-Auswahl      : $activeBackendName")
+        sb.appendLine("Backend-Registry     : ${backendInfo.joinToString { "${it.registryName}=${if (it.available) "available" else "unavailable"}" }.ifBlank { "nicht verfügbar" }}")
         sb.appendLine("Android-Version      : Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
         sb.appendLine("Gerät / Hardware     : ${Build.MANUFACTURER} ${Build.MODEL} (${telemetry.cpuArch}, ${telemetry.cpuCores} Kerne)")
         sb.appendLine("Thermal Status       : ${telemetry.thermalStatus}")
@@ -145,7 +174,12 @@ object ExportManager {
         sb.appendLine("  Context (n_ctx)    : ${config.nCtx}")
         sb.appendLine("  Batch (n_batch)    : ${config.nBatch}")
         sb.appendLine("  Micro-Batch (n_ub) : ${config.nUbatch}")
-        sb.appendLine("  Threads            : ${config.nThreads}")
+        sb.appendLine("  Threads Generation : ${config.nThreads}")
+        sb.appendLine("  Threads Prefill    : ${config.nThreadsBatch}")
+        sb.appendLine("  Backend Preference : ${config.backendPreference.name}")
+        sb.appendLine("  Temperatur         : ${config.temperature}")
+        sb.appendLine("  Top-K              : ${config.topK}")
+        sb.appendLine("  Top-P              : ${config.topP}")
         sb.appendLine("  Temperatur         : ${config.temperature}")
         sb.appendLine("  Max Tokens         : ${config.maxTokens}")
         sb.appendLine("--------------------------------------------------------------------------------")
@@ -169,6 +203,9 @@ object ExportManager {
                 sb.appendLine("  First Token       : ${r.firstTokenDurationMs} ms")
                 sb.appendLine("  Prompt Decode     : ${r.promptDecodeCalls} Aufrufe")
                 sb.appendLine("  Generation Decode : ${r.generationDecodeCalls} Aufrufe")
+                sb.appendLine("  Threads Batch     : ${r.nThreadsBatch}")
+                sb.appendLine("  Backend           : ${r.activeBackend} (Policy: ${r.backendPreference})")
+                sb.appendLine("  Sampling          : temp=${r.temperature}, topK=${r.topK}, topP=${r.topP}")
                 sb.appendLine("  Prompt-Eval Dauer : ${r.promptEvalDurationMs} ms")
                 sb.appendLine("  Generierungsdauer : ${r.generationDurationMs} ms")
                 sb.appendLine("  Durchsatz         : ${"%.2f".format(r.tokensPerSecond)} Tokens/s")

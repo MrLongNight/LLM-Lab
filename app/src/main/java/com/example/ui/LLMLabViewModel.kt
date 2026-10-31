@@ -11,6 +11,8 @@ import com.example.data.TestRunEntity
 import com.example.engine.ExportManager
 import com.example.engine.GgufInfo
 import com.example.engine.GgufMetadataParser
+import com.example.engine.BackendPreference
+import com.example.engine.NativeBackendInfo
 import com.example.engine.InferenceCallback
 import com.example.engine.InferenceConfig
 import com.example.engine.LlamaNativeBridge
@@ -65,7 +67,8 @@ sealed class ModelLifecycleState {
         val ggufInfo: GgufInfo,
         val initDurationMs: Long,
         val engineVersion: String,
-        val loadedConfig: InferenceConfig
+        val loadedConfig: InferenceConfig,
+        val activeBackendName: String
     ) : ModelLifecycleState()
     data class InferenceRunning(
         val prompt: String,
@@ -112,6 +115,9 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     private val _config = MutableStateFlow(InferenceConfig.fromPreset(ProfilePreset.BALANCED))
     val config: StateFlow<InferenceConfig> = _config.asStateFlow()
 
+    private val _availableBackends = MutableStateFlow<List<NativeBackendInfo>>(emptyList())
+    val availableBackends: StateFlow<List<NativeBackendInfo>> = _availableBackends.asStateFlow()
+
     private val welcomeMessageId = java.util.UUID.randomUUID().toString()
     private val _chatMessages = MutableStateFlow<List<ChatMessage>>(listOf(
         ChatMessage(
@@ -157,6 +163,9 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     private var lastModelSelection: ModelLifecycleState.ModelSelected? = null
 
     init {
+        viewModelScope.launch(Dispatchers.IO) {
+            _availableBackends.value = nativeBridge.getBackendInfo()
+        }
         // Starte periodische Telemetrieerfassung
         viewModelScope.launch(Dispatchers.Default) {
             while (true) {
@@ -282,7 +291,8 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             timeoutInitSec = _config.value.timeoutInitSec,
             timeoutShortTestSec = _config.value.timeoutShortTestSec,
             timeoutNormalInferenceSec = _config.value.timeoutNormalInferenceSec,
-            timeoutStressTestSec = _config.value.timeoutStressTestSec
+            timeoutStressTestSec = _config.value.timeoutStressTestSec,
+            backendPreference = _config.value.backendPreference
         )
     }
 
@@ -463,7 +473,8 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                         ggufInfo = selected.ggufInfo,
                         initDurationMs = System.currentTimeMillis() - startTime,
                         engineVersion = nativeBridge.getEngineVersion(),
-                        loadedConfig = configForLoad
+                        loadedConfig = configForLoad,
+                        activeBackendName = nativeBridge.getActiveBackendName()
                     )
                 }
             } catch (e: Exception) {
@@ -618,6 +629,12 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 nBatch = currentConfig.nBatch,
                 nUbatch = currentConfig.nUbatch,
                 nThreads = currentConfig.nThreads,
+                    nThreadsBatch = currentConfig.nThreadsBatch,
+                    backendPreference = currentConfig.backendPreference.name,
+                    activeBackend = readyState.activeBackendName,
+                    temperature = currentConfig.temperature,
+                    topK = currentConfig.topK,
+                    topP = currentConfig.topP,
                 finishReason = finalMetrics.finishReason,
                 isSuccess = (finalMetrics.finishReason == "STOP_TOKEN" || finalMetrics.finishReason == "MAX_TOKENS") &&
                     finalMetrics.generatedTokens > 0,
@@ -746,6 +763,12 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     nBatch = configForTest.nBatch,
                     nUbatch = configForTest.nUbatch,
                     nThreads = configForTest.nThreads,
+                    nThreadsBatch = configForTest.nThreadsBatch,
+                    backendPreference = configForTest.backendPreference.name,
+                    activeBackend = readyState.activeBackendName,
+                    temperature = configForTest.temperature,
+                    topK = configForTest.topK,
+                    topP = configForTest.topP,
                     finishReason = metrics.finishReason,
                     isSuccess = runSucceeded,
                     errorMessage = runError,
@@ -865,7 +888,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                         metrics.generatedTokens > 0
                 val responseMatches = collectedText.toString().trim() == "OK"
                 val succeeded = inferenceCompleted && responseMatches
-                val runError = metrics.errorMessage ?: if (inferenceCompleted && !responseMatches) {
+                val runError = metrics.errorMessage?.takeIf { it.isNotBlank() } ?: if (inferenceCompleted && !responseMatches) {
                     "Erwartet wurde exakt OK; erhalten: ${collectedText.toString().take(120)}"
                 } else null
 
@@ -884,6 +907,12 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     nBatch = config.nBatch,
                     nUbatch = config.nUbatch,
                     nThreads = config.nThreads,
+                    nThreadsBatch = config.nThreadsBatch,
+                    backendPreference = config.backendPreference.name,
+                    activeBackend = readyState.activeBackendName,
+                    temperature = config.temperature,
+                    topK = config.topK,
+                    topP = config.topP,
                     finishReason = metrics.finishReason,
                     isSuccess = succeeded,
                     errorMessage = runError,
@@ -990,9 +1019,9 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     else -> "NOT_LOADED"
                 }
                 report = if (asJson) {
-                    ExportManager.generateJson(context, runs, _config.value, _telemetry.value, engineVer, modelName, modelSize, modelInfo, modelStatus)
+                    ExportManager.generateJson(context, runs, _config.value, _telemetry.value, engineVer, modelName, modelSize, modelInfo, modelStatus, _availableBackends.value, nativeBridge.getActiveBackendName())
                 } else {
-                    ExportManager.generateTxt(context, runs, _config.value, _telemetry.value, engineVer, modelName, modelSize, modelInfo, modelStatus)
+                    ExportManager.generateTxt(context, runs, _config.value, _telemetry.value, engineVer, modelName, modelSize, modelInfo, modelStatus, _availableBackends.value, nativeBridge.getActiveBackendName())
                 }
 
                 val savedPath = ExportManager.saveExportToDownloads(context, report!!, fileName, mimeType)
