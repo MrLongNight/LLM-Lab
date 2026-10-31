@@ -44,18 +44,23 @@ jobs:
             keytool -genkey -v -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Accept Android SDK Licenses
+      - name: Accept Android SDK Licenses & Install NDK
         run: |
-          mkdir -p "${ANDROID_HOME}/licenses"
-          echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" >> "${ANDROID_HOME}/licenses/android-sdk-license"
-          echo "d56f5187479451eabf01fb78af6dfcb131a6481e" >> "${ANDROID_HOME}/licenses/android-sdk-license"
-          echo "8933bad161af4178b1185d1a37fbf41ea5269c55" >> "${ANDROID_HOME}/licenses/android-sdk-license"
-          echo "84831b9409646a245e303448c1ec612ab0ec86a9" >> "${ANDROID_HOME}/licenses/android-sdk-preview-license"
-          echo "601085b94cd77f0b54ff86406955d9941874fe0f" >> "${ANDROID_HOME}/licenses/android-googletv-license"
-          echo "859f317696e3f23621d44d423c8b623a32246152" >> "${ANDROID_HOME}/licenses/android-sdk-arm-dbt-license"
-          echo "25884f5d56b029b114e7f7ac690f6641e23a30dc" >> "${ANDROID_HOME}/licenses/google-gdk-license"
-          echo "e9acab587ff1b6049bfac544f7c2203d1744354e" >> "${ANDROID_HOME}/licenses/mips-android-sysimage-license"
+          for SDK_PATH in "${ANDROID_HOME}" "${ANDROID_SDK_ROOT}"; do
+            if [ -n "$SDK_PATH" ]; then
+              mkdir -p "$SDK_PATH/licenses"
+              echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" >> "$SDK_PATH/licenses/android-sdk-license"
+              echo "d56f5187479451eabf01fb78af6dfcb131a6481e" >> "$SDK_PATH/licenses/android-sdk-license"
+              echo "8933bad161af4178b1185d1a37fbf41ea5269c55" >> "$SDK_PATH/licenses/android-sdk-license"
+              echo "84831b9409646a245e303448c1ec612ab0ec86a9" >> "$SDK_PATH/licenses/android-sdk-preview-license"
+              echo "601085b94cd77f0b54ff86406955d9941874fe0f" >> "$SDK_PATH/licenses/android-googletv-license"
+              echo "859f317696e3f23621d44d423c8b623a32246152" >> "$SDK_PATH/licenses/android-sdk-arm-dbt-license"
+              echo "25884f5d56b029b114e7f7ac690f6641e23a30dc" >> "$SDK_PATH/licenses/google-gdk-license"
+              echo "e9acab587ff1b6049bfac544f7c2203d1744354e" >> "$SDK_PATH/licenses/mips-android-sysimage-license"
+            fi
+          done
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          yes | sdkmanager "ndk;26.3.11579264" "cmake;3.22.1"
 
       - name: Build APK with Gradle
         run: ./gradlew assembleDebug --no-daemon --no-configuration-cache --stacktrace
