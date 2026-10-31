@@ -25,29 +25,39 @@ data class SystemTelemetry(
     val appCpuUsagePercent: Float?
 )
 
-object SystemTelemetryManager {
-    private val cpuSampleLock = Any()
+internal class ProcessCpuUsageSampler {
     private var lastCpuTimeMs: Long? = null
-    private var lastWallTimeMs: Long? = null
+    private var lastElapsedTimeMs: Long? = null
 
-    private fun sampleAppCpuPercent(coreCount: Int): Float? = synchronized(cpuSampleLock) {
-        val cpuNow = Process.getElapsedCpuTime()
-        val wallNow = SystemClock.elapsedRealtime()
-        val cpuPrevious = lastCpuTimeMs
-        val wallPrevious = lastWallTimeMs
-        lastCpuTimeMs = cpuNow
-        lastWallTimeMs = wallNow
+    @Synchronized
+    fun sample(cpuTimeMs: Long, elapsedTimeMs: Long, logicalCpuCount: Int): Float? {
+        val previousCpu = lastCpuTimeMs
+        val previousElapsed = lastElapsedTimeMs
+        lastCpuTimeMs = cpuTimeMs
+        lastElapsedTimeMs = elapsedTimeMs
 
-        if (cpuPrevious == null || wallPrevious == null) return@synchronized null
-        val cpuDelta = cpuNow - cpuPrevious
-        val wallDelta = wallNow - wallPrevious
-        if (cpuDelta < 0L || wallDelta <= 0L || coreCount <= 0) return@synchronized null
+        if (previousCpu == null || previousElapsed == null) return null
+        val cpuDelta = cpuTimeMs - previousCpu
+        val elapsedDelta = elapsedTimeMs - previousElapsed
+        if (cpuDelta < 0L || elapsedDelta <= 0L || logicalCpuCount <= 0) return null
 
-        // 100% means the app process consumed one full logical CPU on average.
-        ((cpuDelta.toDouble() / (wallDelta.toDouble() * coreCount)) * 100.0)
+        // 100% means the process consumed all available logical CPU capacity
+        // on average during this interval.
+        return ((cpuDelta.toDouble() / (elapsedDelta.toDouble() * logicalCpuCount)) * 100.0)
             .toFloat()
             .coerceIn(0f, 100f)
     }
+}
+
+object SystemTelemetryManager {
+    private val processCpuSampler = ProcessCpuUsageSampler()
+
+    private fun sampleAppCpuPercent(coreCount: Int): Float? =
+        processCpuSampler.sample(
+            cpuTimeMs = Process.getElapsedCpuTime(),
+            elapsedTimeMs = SystemClock.elapsedRealtime(),
+            logicalCpuCount = coreCount
+        )
 
     fun capture(context: Context): SystemTelemetry {
         // Java Heap

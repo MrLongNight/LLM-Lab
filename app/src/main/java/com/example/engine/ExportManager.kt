@@ -184,7 +184,6 @@ object ExportManager {
         sb.appendLine("  Temperatur         : ${config.temperature}")
         sb.appendLine("  Top-K              : ${config.topK}")
         sb.appendLine("  Top-P              : ${config.topP}")
-        sb.appendLine("  Temperatur         : ${config.temperature}")
         sb.appendLine("  Max Tokens         : ${config.maxTokens}")
         sb.appendLine("--------------------------------------------------------------------------------")
         sb.appendLine("SPEICHER-TELEMETRIE:")

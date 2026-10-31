@@ -50,6 +50,13 @@ class BackendConfigTest {
     }
 
     @Test
+    fun batchSizeRequiresReloadButGenerationLimitDoesNot() {
+        val base = InferenceConfig()
+        assertFalse(base.hasSameNativeContext(base.copy(nBatch = 256)))
+        assertTrue(base.hasSameNativeContext(base.copy(maxTokens = 256)))
+    }
+
+    @Test
     fun prefillThreadsAndBackendRequireNativeContextReload() {
         val base = InferenceConfig()
         assertFalse(base.hasSameNativeContext(base.copy(nThreadsBatch = base.nThreadsBatch - 1)))
