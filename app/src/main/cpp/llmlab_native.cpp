@@ -205,7 +205,8 @@ std::string backendRegistryReportJson() {
             << "\"runtimeName\":\"" << jsonEscape(runtimeName) << "\","
             << "\"kind\":\"" << jsonEscape(backendKind(registryName)) << "\","
             << "\"bufferType\":\"" << jsonEscape(bufferType) << "\","
-            << "\"available\":" << (available ? "true" : "false")
+            << "\"available\":" << (available ? "true" : "false") << ","
+            << "\"supportsAbort\":" << (backendKind(registryName) == "CPU" ? "true" : "false")
             << "}";
     }
     out << "]";
@@ -294,7 +295,10 @@ bool NativeLlamaEngine::loadModel(
         return false;
     }
 
-    int requestedGpuLayers = (config.backend_preference != 1 && acceleratorAvailable) ? 999 : 0;
+    // llama.cpp b3600 documents abort_callback as CPU-only. AUTO therefore
+    // prefers a reliably cancellable CPU execution path; GPU/NPU offload is
+    // explicit and experimental until process isolation/backend cancellation exists.
+    int requestedGpuLayers = (config.backend_preference == 2 && acceleratorAvailable) ? 999 : 0;
     auto makeModelParams = [&](int gpuLayers) {
         llama_model_params params = llama_model_default_params();
         params.n_gpu_layers = gpuLayers;
@@ -420,7 +424,7 @@ std::string NativeLlamaEngine::getActiveBackendName() const {
     std::lock_guard<std::mutex> lock(engine_mutex);
     if (!is_model_loaded.load()) return "Kein Modell geladen";
     if (active_gpu_layers_requested > 0) {
-        return active_backend_name + " (GPU-Layer-Offload angefordert; tatsächliche Layerzahl siehe llama.cpp-Load-Log)";
+        return active_backend_name + " (experimenteller Offload; Abbruch nicht garantiert; Layerzahl siehe llama.cpp-Load-Log)";
     }
     return "CPU";
 }

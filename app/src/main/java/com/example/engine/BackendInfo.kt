@@ -3,9 +3,9 @@ package com.example.engine
 import org.json.JSONArray
 
 enum class BackendPreference(val nativeCode: Int, val label: String, val description: String) {
-    AUTO(0, "Automatisch", "Nutzt einen verfügbaren Beschleuniger, sonst CPU."),
+    AUTO(0, "Automatisch (sicher abbrechbar)", "Verwendet auf llama.cpp b3600 CPU, solange GPU-Abbruch nicht zuverlässig unterstützt wird."),
     CPU_ONLY(1, "Nur CPU", "Erzwingt den portablen CPU-Fallback."),
-    ACCELERATOR_REQUIRED(2, "Beschleuniger erforderlich", "Startet nur, wenn ein GPU-/Accelerator-Backend tatsächlich initialisiert werden kann.")
+    ACCELERATOR_REQUIRED(2, "Beschleuniger-Test (experimentell)", "Erzwingt GPU-/Accelerator-Offload. Abbruch/Timeout ist in llama.cpp b3600 dafür nicht garantiert.")
 }
 
 data class NativeBackendInfo(
@@ -13,7 +13,8 @@ data class NativeBackendInfo(
     val runtimeName: String,
     val kind: String,
     val bufferType: String,
-    val available: Boolean
+    val available: Boolean,
+    val supportsAbort: Boolean
 ) {
     companion object {
         fun parseReport(raw: String): List<NativeBackendInfo> = runCatching {
@@ -27,7 +28,8 @@ data class NativeBackendInfo(
                             runtimeName = item.optString("runtimeName", ""),
                             kind = item.optString("kind", "UNBEKANNT"),
                             bufferType = item.optString("bufferType", ""),
-                            available = item.optBoolean("available", false)
+                            available = item.optBoolean("available", false),
+                            supportsAbort = item.optBoolean("supportsAbort", false)
                         )
                     )
                 }

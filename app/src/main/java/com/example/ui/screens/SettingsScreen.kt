@@ -138,7 +138,7 @@ fun SettingsScreen(viewModel: LLMLabViewModel) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Hardware-Backends (llama.cpp Runtime-Registry)", color = NeonCyan, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                 Text(
-                    "Die Liste zeigt Backends, die in diese APK einkompiliert wurden und sich auf diesem Gerät tatsächlich initialisieren lassen. Sie ist keine Garantie für erfolgreiche Layer-Auslagerung.",
+                    "Die Liste zeigt einkompilierte und initialisierbare Backends. AUTO wählt nur sicher abbrechbare Pfade. GPU/NPU ist in llama.cpp b3600 ein expliziter Versuch, solange kein garantierter Abbruch verfügbar ist.",
                     color = TextSecondary, fontSize = 11.sp
                 )
                 if (availableBackends.isEmpty()) {
@@ -148,7 +148,12 @@ fun SettingsScreen(viewModel: LLMLabViewModel) {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(backend.registryName, color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                                Text(listOf(backend.kind, backend.bufferType).filter { it.isNotBlank() }.joinToString(" · "), color = TextMuted, fontSize = 10.sp)
+                                Text(
+                                    listOf(backend.kind, backend.bufferType, if (backend.supportsAbort) "Abbruch unterstützt" else "Abbruch nicht garantiert")
+                                        .filter { it.isNotBlank() }.joinToString(" · "),
+                                    color = TextMuted,
+                                    fontSize = 10.sp
+                                )
                             }
                             Text(if (backend.available) "Initialisierbar" else "Nicht verfügbar", color = if (backend.available) MatrixGreen else TextMuted, fontSize = 11.sp)
                         }

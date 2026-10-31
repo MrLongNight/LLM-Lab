@@ -9,6 +9,21 @@ add_compile_options(-O3 -DNDEBUG)
 # optional and is used only when an Android device exposes a working GPU backend.
 option(LLMLAB_ENABLE_VULKAN "Build the generic Vulkan GPU backend" ON)
 
+if(LLMLAB_ENABLE_VULKAN)
+    include(FetchContent)
+    FetchContent_Declare(
+        vulkan_headers
+        GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
+        GIT_TAG v1.3.275
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_GetProperties(vulkan_headers)
+    if(NOT vulkan_headers_POPULATED)
+        FetchContent_Populate(vulkan_headers)
+    endif()
+    include_directories(BEFORE SYSTEM "${vulkan_headers_SOURCE_DIR}/include")
+endif()
+
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
