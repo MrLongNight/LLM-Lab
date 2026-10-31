@@ -557,7 +557,7 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
 
     generationStartUs = llama_time_us();
 
-    if (vocabSize <= 0) {
+    if (llama_vocab_n_tokens(vocab) <= 0) {
         setNativeError(metrics, "Modell meldet eine ungültige Vokabulargröße");
         return finish();
     }
@@ -699,7 +699,7 @@ Java_com_example_engine_LlamaNativeBridge_nativeGetVersion(JNIEnv* env, jobject 
 JNIEXPORT jstring JNICALL
 Java_com_example_engine_LlamaNativeBridge_nativeGetBackendReport(JNIEnv* env, jobject /* this */) {
     std::call_once(g_backend_init_once, []() { llama_backend_init(); });
-    return newJavaStringFromUtf8(env, backendRegistryReportJson());
+    return newJavaStringFromUtf8(env, backendDeviceReportJson());
 }
 
 JNIEXPORT jstring JNICALL
