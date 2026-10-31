@@ -48,6 +48,7 @@ public:
     ~NativeLlamaEngine();
 
     bool loadModel(const std::string& path, const NativeInferenceConfig& config, std::string& outError);
+    bool reconfigureContext(const NativeInferenceConfig& config, std::string& outError);
     void unloadModel();
     bool isLoaded() const;
 
@@ -82,6 +83,7 @@ private:
     std::string loaded_model_architecture;
     std::string active_backend_name = "CPU";
     std::string model_load_log;
+    std::string context_reconfigure_log;
     int active_gpu_layers_requested = 0;
     ggml_backend_dev_t active_backend_device = nullptr;
     NativeInferenceConfig active_config;

@@ -118,6 +118,36 @@ class LlamaNativeBridge(private val nativeLibraryDir: String?) {
         }
     }
 
+    /**
+     * Rebuilds only llama_context while retaining the currently loaded GGUF weights.
+     * Returns false when a CPU/Vulkan weight-placement switch requires full model loading.
+     */
+    fun reconfigureContext(config: InferenceConfig, outError: Array<String?>): Boolean {
+        if (!isNativeLibraryLoaded || engineHandle == 0L) {
+            outError[0] = "Native llama.cpp Engine nicht verfügbar."
+            return false
+        }
+        if (abortFlag.get()) {
+            outError[0] = "Context-Neukonfiguration vor dem JNI-Aufruf abgebrochen."
+            return false
+        }
+        return try {
+            nativeReconfigureContext(
+                engineHandle,
+                config.nCtx,
+                config.nBatch,
+                config.nUbatch,
+                config.nThreads,
+                config.nThreadsBatch,
+                config.backendPreference.nativeCode,
+                outError
+            )
+        } catch (t: Throwable) {
+            outError[0] = "Native Context-Neukonfiguration fehlgeschlagen: ${t.message}"
+            false
+        }
+    }
+
     fun unloadModel() {
         requestAbort()
         if (isNativeLibraryLoaded && engineHandle != 0L) {
@@ -218,6 +248,16 @@ class LlamaNativeBridge(private val nativeLibraryDir: String?) {
     private external fun nativeLoadModel(
         handle: Long,
         modelPath: String,
+        nCtx: Int,
+        nBatch: Int,
+        nUbatch: Int,
+        nThreads: Int,
+        nThreadsBatch: Int,
+        backendPreference: Int,
+        outError: Array<String?>
+    ): Boolean
+    private external fun nativeReconfigureContext(
+        handle: Long,
         nCtx: Int,
         nBatch: Int,
         nUbatch: Int,

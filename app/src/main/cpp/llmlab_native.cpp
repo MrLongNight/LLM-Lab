@@ -12,6 +12,7 @@
 #include <cctype>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <cstdint>
 #include <vector>
 
@@ -287,6 +288,7 @@ void NativeLlamaEngine::clearModelLocked() {
     loaded_model_architecture.clear();
     active_backend_name = "CPU";
     model_load_log.clear();
+    context_reconfigure_log.clear();
     active_gpu_layers_requested = 0;
     active_backend_device = nullptr;
 }
@@ -336,6 +338,104 @@ bool NativeLlamaEngine::loadModel(const std::string& path,const NativeInferenceC
     return true;
 }
 
+bool NativeLlamaEngine::reconfigureContext(
+    const NativeInferenceConfig& config,
+    std::string& outError
+) {
+    std::lock_guard<std::mutex> lock(engine_mutex);
+    if (llama_model_ptr == nullptr || !is_model_loaded.load()) {
+        outError = "Kein geladenes Modell für Context-Neukonfiguration vorhanden.";
+        return false;
+    }
+
+    const bool requestedAccelerator = config.backend_preference == 2;
+    const bool modelUsesAccelerator = active_gpu_layers_requested != 0;
+    if (requestedAccelerator != modelUsesAccelerator) {
+        outError = "BACKEND_SWITCH_REQUIRED: Wechsel zwischen CPU und Vulkan erfordert eine neue Gewichtplatzierung.";
+        return false;
+    }
+    if (isAbortRequested()) {
+        outError = "Context-Neukonfiguration vor dem Start abgebrochen.";
+        return false;
+    }
+
+    const NativeInferenceConfig previousConfig = active_config;
+    const auto makeContextParams = [this](const NativeInferenceConfig& value, bool useAccelerator) {
+        llama_context_params params = llama_context_default_params();
+        params.n_ctx = static_cast<uint32_t>(std::max(128, value.n_ctx));
+        params.n_batch = static_cast<uint32_t>(std::max(1, value.n_batch));
+        params.n_ubatch = static_cast<uint32_t>(std::max(1, std::min(value.n_ubatch, value.n_batch)));
+        params.n_threads = static_cast<int32_t>(std::max(1, value.n_threads));
+        params.n_threads_batch = static_cast<int32_t>(std::max(1, value.n_threads_batch));
+        params.n_seq_max = 1;
+        params.offload_kqv = useAccelerator;
+        params.abort_callback = useAccelerator ? nullptr : &NativeLlamaEngine::abortCallback;
+        params.abort_callback_data = useAccelerator ? nullptr : this;
+        return params;
+    };
+
+    // Free KV cache / graph context first. The multi-gigabyte GGUF model stays
+    // loaded and mmap-backed; only the comparatively small context is rebuilt.
+    llama_context* previousContext = llama_ctx_ptr;
+    llama_ctx_ptr = nullptr;
+    is_model_loaded.store(false);
+    if (previousContext != nullptr) {
+        llama_free(previousContext);
+    }
+
+    std::string newContextLog;
+    llama_context* updatedContext = nullptr;
+    {
+        ScopedModelLoadLogCapture logCapture(newContextLog);
+        updatedContext = llama_init_from_model(
+            llama_model_ptr,
+            makeContextParams(config, requestedAccelerator)
+        );
+    }
+
+    context_reconfigure_log = std::move(newContextLog);
+    if (updatedContext == nullptr || isAbortRequested()) {
+        if (updatedContext != nullptr) {
+            llama_free(updatedContext);
+        }
+
+        // If the requested context cannot be created, try to restore the exact
+        // previous context settings without reloading the model weights.
+        std::string restoreLog;
+        {
+            ScopedModelLoadLogCapture logCapture(restoreLog);
+            llama_ctx_ptr = llama_init_from_model(
+                llama_model_ptr,
+                makeContextParams(previousConfig, modelUsesAccelerator)
+            );
+        }
+        if (llama_ctx_ptr != nullptr) {
+            active_config = previousConfig;
+            is_model_loaded.store(true);
+        } else {
+            clearModelLocked();
+        }
+
+        outError = isAbortRequested()
+            ? "Context-Neukonfiguration abgebrochen; vorheriger Context wurde soweit möglich wiederhergestellt."
+            : "Neuer llama.cpp Context konnte nicht erstellt werden; vorheriger Context wurde soweit möglich wiederhergestellt.";
+        if (!restoreLog.empty()) {
+            context_reconfigure_log += "\n[RESTORE PREVIOUS CONTEXT]\n" + restoreLog;
+        }
+        return false;
+    }
+
+    llama_ctx_ptr = updatedContext;
+    active_config = config;
+    is_model_loaded.store(true);
+    LOGI(
+        "Context reconfigured without reloading GGUF weights: n_ctx=%d n_batch=%d n_ubatch=%d threads=%d/%d backend=%s",
+        config.n_ctx, config.n_batch, config.n_ubatch, config.n_threads, config.n_threads_batch,
+        active_backend_name.c_str()
+    );
+    return true;
+}
+
 void NativeLlamaEngine::unloadModel() {
     requestAbort();
     std::lock_guard<std::mutex> lock(engine_mutex);
@@ -374,7 +474,7 @@ std::string NativeLlamaEngine::getActiveBackendName() const {
 
 std::string NativeLlamaEngine::getModelLoadLog() const {
     std::lock_guard<std::mutex> lock(engine_mutex);
-    return model_load_log;
+    return model_load_log + (context_reconfigure_log.empty() ? std::string() : std::string("\n[LAST CONTEXT RECONFIGURATION]\n") + context_reconfigure_log);
 }
 
 int64_t NativeLlamaEngine::getNativeAllocatedHeap() const {
@@ -822,6 +922,39 @@ Java_com_example_engine_LlamaNativeBridge_nativeLoadModel(
 
     std::string error;
     const bool ok = engine->loadModel(path, config, error);
+    if (!ok && outErrorArray != nullptr && env->GetArrayLength(outErrorArray) > 0) {
+        jstring jError = env->NewStringUTF(error.c_str());
+        env->SetObjectArrayElement(outErrorArray, 0, jError);
+        env->DeleteLocalRef(jError);
+    }
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_example_engine_LlamaNativeBridge_nativeReconfigureContext(
+    JNIEnv* env,
+    jobject /* this */,
+    jlong handle,
+    jint nCtx,
+    jint nBatch,
+    jint nUbatch,
+    jint nThreads,
+    jint nThreadsBatch,
+    jint backendPreference,
+    jobjectArray outErrorArray
+) {
+    if (handle == 0) return JNI_FALSE;
+    auto* engine = reinterpret_cast<NativeLlamaEngine*>(handle);
+    NativeInferenceConfig config;
+    config.n_ctx = nCtx;
+    config.n_batch = nBatch;
+    config.n_ubatch = nUbatch;
+    config.n_threads = nThreads;
+    config.n_threads_batch = nThreadsBatch;
+    config.backend_preference = backendPreference;
+
+    std::string error;
+    const bool ok = engine->reconfigureContext(config, error);
     if (!ok && outErrorArray != nullptr && env->GetArrayLength(outErrorArray) > 0) {
         jstring jError = env->NewStringUTF(error.c_str());
         env->SetObjectArrayElement(outErrorArray, 0, jError);

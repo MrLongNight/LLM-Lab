@@ -40,15 +40,15 @@ Die GitHub-Actions-Pipeline führt dieselben beiden Gradle-Aufgaben aus und ver�
 
 ## Inferenzmesswerte
 
-Die JNI-Schicht liefert tatsächliche Werte aus `llama.cpp`: Prompt-Tokenisierung, Prompt-Tokenanzahl, Prompt-Evaluierungsdauer, Prompt-Decode-Aufrufe, First-Token-Latenz, generierte Tokens, Generierungsdauer, Generierungs-Decode-Aufrufe, Gesamtdauer und Tokens/s. Es werden keine aus Prompt-Länge geschätzten Tokenzahlen oder simulierten Antworttexte als Inferenz ausgegeben.
+Die JNI-Schicht liefert tatsächliche Werte aus `llama.cpp`: Prompt-Tokenisierung, Prompt-Tokenanzahl, Prompt-Evaluierungsdauer, Prompt-Decode-Aufrufe, First-Token-Latenz, generierte Tokens, Generierungsdauer, Generierungs-Decode-Aufrufe, Gesamtdauer und Tokens/s. Der Diagnoseexport weist zusätzlich die Zeit zwischen Prefill-Ende und erstem Token, die Profilvorbereitung sowie den Prozess-PSS inklusive anteilig gemappter Modellseiten aus. Es werden keine aus Prompt-Länge geschätzten Tokenzahlen oder simulierten Antworttexte als Inferenz ausgegeben.
 
 Der Prompt-Callback meldet Fortschritt während der Prompt-Auswertung. Während der eigentlichen Token-Generierung wird der echte Token-Stream angezeigt. Gerätemesswerte, die Android nicht zuverlässig bereitstellt, müssen als nicht verfügbar behandelt werden. Der native Allocator-Heap umfasst nicht zwingend alle per `mmap` eingeblendeten Modellgewichte.
 
 ## Testprofile
 
-Für reproduzierbare Vergleiche hält jeder Workflow `n_ctx=2048`, `n_batch=512`, Temperatur `0.05`, Top-k `20` und Top-p `0.8` konstant. Die drei Testprofile variieren Backend, Threads und Micro-Batch: CPU-Referenz (AUTO, 4/8 Threads, `n_ubatch=32`), CPU-Wide-Batch (CPU_ONLY, 8/8 Threads, `n_ubatch=64`) und Vulkan-Offload (ACCELERATOR_REQUIRED, 8/8 Threads, `n_ubatch=64`). Die maximale Tokenzahl ist je Workflow begrenzt.
+Für reproduzierbare Vergleiche hält jeder Workflow `n_ctx=2048`, `n_batch=512`, Temperatur `0.05`, Top-k `20` und Top-p `0.8` konstant. Die drei Testprofile variieren Backend, Threads und Micro-Batch: CPU-Referenz (AUTO, 4/8 Threads, `n_ubatch=32`), CPU-Wide-Batch (CPU_ONLY, 4/8 Threads, `n_ubatch=64`) und Vulkan-Offload (ACCELERATOR_REQUIRED, 4/8 Threads, `n_ubatch=64`). Die maximale Tokenzahl ist je Workflow begrenzt.
 
-Das Prompt-Labor bietet drei automatische Workflows: (1) längere deutsche Antwort für Prefill-/Durchsatzmessung, (2) zweisätzige deutsche DMS-Erklärung und (3) synthetische Rechnungs-Extraktion mit sieben JSON-Feldern einschließlich `iban=null` und `poNumber=null`. Jeder Workflow wird nacheinander mit drei nativen Profilen ausgeführt; die ursprüngliche Modellkonfiguration wird anschließend wiederhergestellt.
+Das Prompt-Labor bietet drei automatische Workflows: (1) längere deutsche Antwort für Prefill-/Durchsatzmessung, (2) zweisätzige deutsche DMS-Erklärung und (3) synthetische Rechnungs-Extraktion mit sieben JSON-Feldern einschließlich `iban=null` und `poNumber=null`. Jeder Workflow wird nacheinander mit drei nativen Profilen ausgeführt; die ursprüngliche Modellkonfiguration wird anschließend wiederhergestellt. Bei CPU-zu-CPU-Profilwechseln wird nur der llama_context neu aufgebaut; die mmap-gemappten GGUF-Gewichte bleiben geladen. Nur ein Wechsel der CPU-/Vulkan-Gewichtplatzierung lädt das GGUF erneut.
 
 Sampling-Parameter bleiben innerhalb eines Dreiervergleichs identisch, damit Unterschiede primär auf Backend, Threads und Micro-Batch zurückgeführt werden können. Native llama.cpp-Kernel werden auch im Debug-APK mit `-O3` kompiliert.
 

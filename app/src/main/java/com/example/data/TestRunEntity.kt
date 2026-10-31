@@ -52,5 +52,11 @@ data class TestRunEntity(
     @ColumnInfo(defaultValue = "160")
     val maxTokens: Int = 160,
     @ColumnInfo(defaultValue = "NULL")
-    val appCpuUsagePercent: Float? = null
+    val appCpuUsagePercent: Float? = null,
+    @ColumnInfo(defaultValue = "0")
+    val profileSetupDurationMs: Long = 0,
+    @ColumnInfo(defaultValue = "'UNKNOWN'")
+    val profileSetupMode: String = "UNKNOWN",
+    @ColumnInfo(defaultValue = "0")
+    val processPssBytes: Long = 0
 )

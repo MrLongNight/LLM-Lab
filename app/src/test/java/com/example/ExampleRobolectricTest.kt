@@ -151,11 +151,12 @@ class ExampleRobolectricTest {
         assertEquals(BackendPreference.ACCELERATOR_REQUIRED, variants.last().backendPreference)
         assertEquals(32, variants.first().nUbatch)
         assertEquals(64, variants[1].nUbatch)
-        assertEquals(8, variants[1].nThreads)
+        assertEquals(4, variants[1].nThreads)
         assertEquals(8, variants[1].nThreadsBatch)
-        assertEquals(8, variants[2].nThreads)
+        assertEquals(4, variants[2].nThreads)
         assertEquals(8, variants[2].nThreadsBatch)
         assertEquals(BackendPreference.CPU_ONLY, variants[1].backendPreference)
+        assertEquals(BackendPreference.ACCELERATOR_REQUIRED, variants[2].backendPreference)
     }
 
     @Test

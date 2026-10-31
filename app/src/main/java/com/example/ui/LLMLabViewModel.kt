@@ -1,6 +1,8 @@
 package com.example.ui
 
 import android.app.Application
+import android.os.Debug
+import android.os.SystemClock
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
@@ -719,10 +721,15 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
      * Reload the already-copied GGUF with a new native configuration.
      * The workflow runs serially on the engine-operation dispatcher.
      */
+    private data class PreparedTestProfile(
+        val ready: ModelLifecycleState.Ready,
+        val mode: String
+    )
+
     private suspend fun reloadCachedModelForTest(
         baseReady: ModelLifecycleState.Ready,
         config: InferenceConfig
-    ): ModelLifecycleState.Ready? {
+    ): PreparedTestProfile? {
         val cacheModel = File(getApplication<Application>().filesDir, "active_model.gguf")
         if (!cacheModel.isFile || cacheModel.length() <= 0L) {
             _modelState.value = ModelLifecycleState.Error(
@@ -738,17 +745,56 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             timedOut.set(true)
             _modelState.value = ModelLifecycleState.Aborting
             nativeBridge.requestAbort()
-            monitorNativeAbortResponsiveness(activeInferenceJob, "Testprofil-Modellinitialisierung")
+            monitorNativeAbortResponsiveness(activeInferenceJob, "Testprofil-Konfiguration")
         }
 
         try {
             _modelState.value = ModelLifecycleState.Initializing(
-                null, "Wechsle Testprofil und lade den nativen Context...", 0
+                null, "Passe Context an; GGUF-Gewichte bleiben bei gleichem Backend geladen...", 0
             )
+            val previousUsesAccelerator =
+                baseReady.loadedConfig.backendPreference == BackendPreference.ACCELERATOR_REQUIRED
+            val requestedUsesAccelerator =
+                config.backendPreference == BackendPreference.ACCELERATOR_REQUIRED
+            val canKeepModelWeights = previousUsesAccelerator == requestedUsesAccelerator
+            val errors = arrayOfNulls<String>(1)
+            val startedAt = SystemClock.elapsedRealtime()
+
+            if (canKeepModelWeights) {
+                nativeBridge.prepareForOperation()
+                val contextUpdated = try {
+                    beginNativeCall()
+                    nativeBridge.reconfigureContext(config, errors)
+                } finally {
+                    endNativeCall()
+                }
+
+                if (contextUpdated) {
+                    return PreparedTestProfile(
+                        ready = baseReady.copy(
+                            initDurationMs = SystemClock.elapsedRealtime() - startedAt,
+                            loadedConfig = config,
+                            activeBackendName = nativeBridge.getActiveBackendName()
+                        ),
+                        mode = "CONTEXT_REBUILT_MODEL_RETAINED"
+                    )
+                }
+                if (timedOut.get() || nativeBridge.isAbortRequested()) {
+                    _modelState.value = ModelLifecycleState.Error(
+                        if (timedOut.get()) "TIMEOUT: Context-Neukonfiguration überschritt ${timeoutSeconds}s."
+                        else errors[0] ?: "Context-Neukonfiguration wurde abgebrochen."
+                    )
+                    return null
+                }
+                Log.w("LLMLabViewModel", "Context-Neukonfiguration fehlgeschlagen; vollständiges Modellladen als Fallback: ${errors[0]}")
+            }
+
+            // CPU <-> Vulkan changes weight placement; only this path reloads the GGUF.
             nativeBridge.unloadModel()
             nativeBridge.prepareForOperation()
-            val errors = arrayOfNulls<String>(1)
-            val startedAt = System.currentTimeMillis()
+            _modelState.value = ModelLifecycleState.Initializing(
+                null, "Backendwechsel: lade GGUF-Gewichte für neue Geräteplatzierung...", 0
+            )
             val loaded = try {
                 beginNativeCall()
                 nativeBridge.loadModel(cacheModel.absolutePath, config, errors)
@@ -771,10 +817,13 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 return null
             }
 
-            return baseReady.copy(
-                initDurationMs = System.currentTimeMillis() - startedAt,
-                loadedConfig = config,
-                activeBackendName = nativeBridge.getActiveBackendName()
+            return PreparedTestProfile(
+                ready = baseReady.copy(
+                    initDurationMs = SystemClock.elapsedRealtime() - startedAt,
+                    loadedConfig = config,
+                    activeBackendName = nativeBridge.getActiveBackendName()
+                ),
+                mode = if (canKeepModelWeights) "MODEL_RELOADED_AFTER_CONTEXT_FAILURE" else "MODEL_RELOADED_BACKEND_SWITCH"
             )
         } catch (error: Throwable) {
             _modelState.value = ModelLifecycleState.Error(
@@ -794,7 +843,9 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
         response: String,
         activeBackend: String,
         succeeded: Boolean,
-        error: String?
+        error: String?,
+        profileSetupDurationMs: Long,
+        profileSetupMode: String
     ) {
         dao.insertRun(TestRunEntity(
             testCategory = "${testCase.id}_${variant.id}",
@@ -819,6 +870,9 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             topP = config.topP,
             maxTokens = config.maxTokens,
             appCpuUsagePercent = _telemetry.value.appCpuUsagePercent,
+            profileSetupDurationMs = profileSetupDurationMs,
+            profileSetupMode = profileSetupMode,
+            processPssBytes = runCatching { Debug.getPss().toLong() * 1024L }.getOrDefault(0L),
             finishReason = metrics.finishReason,
             isSuccess = succeeded,
             errorMessage = error,
@@ -860,9 +914,17 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 val configForTest = variant.toConfig(originalConfig, testCase.maxTokens)
                 _config.value = configForTest
 
-                val readyForVariant = currentReady
+                val profileSetupStartedAt = SystemClock.elapsedRealtime()
+                val alreadyPrepared = currentReady
                     ?.takeIf { it.loadedConfig.hasSameNativeContext(configForTest) }
-                    ?: reloadCachedModelForTest(originalReady, configForTest)
+                    ?.let { PreparedTestProfile(it, "MODEL_REUSED") }
+                val preparedProfile = alreadyPrepared ?: reloadCachedModelForTest(
+                    currentReady ?: originalReady,
+                    configForTest
+                )
+                val profileSetupDurationMs = SystemClock.elapsedRealtime() - profileSetupStartedAt
+                val readyForVariant = preparedProfile?.ready
+                val profileSetupMode = preparedProfile?.mode ?: "PROFILE_PREPARATION_FAILED"
 
                 if (readyForVariant == null) {
                     val error = (_modelState.value as? ModelLifecycleState.Error)?.errorMessage
@@ -880,7 +942,8 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     )
                     persistWorkflowRun(
                         testCase, variant, configForTest, failedMetrics, "",
-                        nativeBridge.getActiveBackendName(), false, error
+                        nativeBridge.getActiveBackendName(), false, error,
+                        profileSetupDurationMs, profileSetupMode
                     )
                     backendEvidence.appendLine("Profil ${index + 1}/3 – ${variant.id}: MODELLLADEN FEHLGESCHLAGEN")
                     backendEvidence.appendLine(error)
@@ -897,20 +960,43 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 // This is the exact native llama.cpp model-load log for this profile,
                 // not merely the selected backend label.
                 val loadLog = nativeBridge.getModelLoadLog()
-                val offloadLines = loadLog.lineSequence()
-                    .filter { line ->
-                        line.contains("offloaded", ignoreCase = true) ||
-                            line.contains("layers to GPU", ignoreCase = true) ||
-                            line.contains("Vulkan", ignoreCase = true) ||
-                            line.contains("model buffer", ignoreCase = true) ||
-                            line.contains("compute buffer", ignoreCase = true)
-                    }
-                    .toList().takeLast(16)
-                    .joinToString("\n")
+                val loadLines = loadLog.lineSequence().toList()
+                val weightOffloadLines = loadLines.filter { line ->
+                    line.contains("offloading", ignoreCase = true) ||
+                        (line.contains("offloaded", ignoreCase = true) && line.contains("layers to GPU", ignoreCase = true))
+                }
+                val weightGpuLayerLines = loadLines.filter { line ->
+                    line.contains("load_tensors: layer", ignoreCase = true) &&
+                        line.contains("assigned to device Vulkan", ignoreCase = true)
+                }
+                val kvGpuLayerLines = loadLines.filter { line ->
+                    line.contains("llama_kv_cache: layer", ignoreCase = true) &&
+                        line.contains("dev = Vulkan", ignoreCase = true)
+                }
+                val backendDeviceLines = loadLines.filter { line ->
+                    line.contains("using device Vulkan", ignoreCase = true) ||
+                        line.contains("Vulkan_Host model buffer", ignoreCase = true) ||
+                        line.contains("Vulkan0 KV buffer", ignoreCase = true) ||
+                        line.contains("compute buffer", ignoreCase = true)
+                }
                 backendEvidence.appendLine("Profil ${index + 1}/3 – ${variant.id}: backend=${readyForVariant.activeBackendName}")
-                backendEvidence.appendLine(
-                    offloadLines.ifBlank { "Kein expliziter GPU-Layer-Offload-Eintrag im llama.cpp-Lade-Log gefunden." }
-                )
+                backendEvidence.appendLine("Profilvorbereitung : $profileSetupMode · ${profileSetupDurationMs} ms")
+                backendEvidence.appendLine("Modellgewichte GPU : ${weightGpuLayerLines.size} explizite Layer-Zuordnungen")
+                backendEvidence.appendLine("KV-Cache GPU       : ${kvGpuLayerLines.size} explizite Layer-Zuordnungen")
+                backendEvidence.appendLine("Gewicht-Offload    :")
+                backendEvidence.appendLine(weightOffloadLines.ifEmpty { listOf("Keine explizite offloaded-X/Y-Layer-Meldung im erhaltenen Modell-Lade-Log.") }.joinToString("\n"))
+                if (backendDeviceLines.isNotEmpty()) {
+                    backendEvidence.appendLine("Backend-/Pufferhinweise:")
+                    backendEvidence.appendLine(backendDeviceLines.joinToString("\n"))
+                }
+                if (weightGpuLayerLines.isNotEmpty()) {
+                    backendEvidence.appendLine("GPU-Modellgewicht-Layer:")
+                    backendEvidence.appendLine(weightGpuLayerLines.joinToString("\n"))
+                }
+                if (kvGpuLayerLines.isNotEmpty()) {
+                    backendEvidence.appendLine("GPU-KV-Cache-Layer:")
+                    backendEvidence.appendLine(kvGpuLayerLines.joinToString("\n"))
+                }
                 backendEvidence.appendLine()
 
                 val localStream = StringBuilder()
@@ -945,13 +1031,15 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
 
                 persistWorkflowRun(
                     testCase, variant, configForTest, metrics, response,
-                    actualBackend, succeeded, error
+                    actualBackend, succeeded, error,
+                    profileSetupDurationMs, profileSetupMode
                 )
 
                 summaries += "Profil ${index + 1}/3 – ${variant.label}: ${if (succeeded) "BESTANDEN" else "FEHLGESCHLAGEN"} · ${metrics.finishReason}\n" +
                     "First Token ${metrics.firstTokenDurationMs} ms · Prefill ${metrics.promptEvalDurationMs} ms / ${metrics.promptTokens} Tokens · " +
                     "Generierung ${metrics.generationDurationMs} ms / ${metrics.generatedTokens} Tokens · ${"%.2f".format(metrics.tokensPerSecond)} Tok/s\n" +
                     "Backend: $actualBackend · Prompt-Decode: ${metrics.promptDecodeCalls} · Generation-Decode: ${metrics.generationDecodeCalls}\n" +
+                    "Profilvorbereitung: $profileSetupMode · ${profileSetupDurationMs} ms · PSS: ${runCatching { Debug.getPss() }.getOrDefault(0)} KB\n" +
                     "Inhalt: ${validation.details}" +
                     (error?.let { "\nFehler: $it" } ?: "")
 
@@ -973,11 +1061,12 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             // Restore the exact user-selected context/backend after the comparison.
             _config.value = originalConfig
             if (!nativeEngineUnresponsive.get()) {
-                val restoredReady = currentReady
+                val restoredProfile = currentReady
                     ?.takeIf { it.loadedConfig.hasSameNativeContext(originalConfig) }
-                    ?: reloadCachedModelForTest(originalReady, originalConfig)
-                if (restoredReady != null) {
-                    _modelState.value = restoredReady
+                    ?.let { PreparedTestProfile(it, "MODEL_REUSED") }
+                    ?: reloadCachedModelForTest(currentReady ?: originalReady, originalConfig)
+                if (restoredProfile != null) {
+                    _modelState.value = restoredProfile.ready
                     _labTestOutput.value += "\n\nUrsprüngliches Modellprofil wurde wiederhergestellt."
                 } else {
                     val restoreError = (_modelState.value as? ModelLifecycleState.Error)?.errorMessage
