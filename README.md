@@ -1,0 +1,76 @@
+# LLM Lab – Mobile Inference Testbench
+
+Eigenständige Android-Test-App zur Untersuchung echter lokaler GGUF-Inferenz auf dem späteren myDocAnizer-Zielgerät. Dieses Repository ist unabhängig von `myDocAnizer-Mobile`; Änderungen hier verändern das Hauptprojekt nicht.
+
+## Architektur und harte Grenzen
+
+- Android, Kotlin, Jetpack Compose, Room und C++/JNI.
+- Native Engine: `llama.cpp` Tag `b3600`, fest gepinnt auf Commit `2fb9267887d24a431892ce4dccc75c7095b0d54d` als Git-Submodul unter `third_party/llama.cpp`.
+- Aktuell wird ausschließlich der CPU-Backend-Pfad gebaut. Vulkan, CUDA, Metal, BLAS und weitere optionale Backends sind deaktiviert.
+- GGUF-Modell wird über den Android-Dateiauswahldialog ausgewählt und vor dem nativen Laden in den internen App-Speicher kopiert. Das Modell ist nicht in der APK enthalten.
+- Eigenständige Package-ID: `de.mrlongnight.llmlab`; `minSdk=29` (Android 10), `targetSdk=36`, ABI `arm64-v8a`.
+- Keine Firebase-, Gemini-, Cloud-, Login- oder externen KI-API-Abhängigkeiten. Das Manifest fordert keine Internet-Berechtigung an und Android-App-Backup ist deaktiviert.
+
+Die App darf „Modell bereit“ erst anzeigen, wenn `llama_load_model_from_file` und `llama_new_context_with_model` erfolgreich zurückgekehrt sind. Bei fehlender nativer Bibliothek gibt es keinen JVM-Ersatzpfad.
+
+## Build und Tests
+
+Voraussetzungen: JDK 21, Android SDK, Android NDK `26.3.11579264`, CMake `3.22.1` und Git-Submodule-Unterstützung.
+
+```bash
+git clone --recurse-submodules https://github.com/MrLongNight/LLM-Lab.git
+cd LLM-Lab
+git submodule update --init --recursive
+chmod +x gradlew
+./gradlew assembleDebug --no-daemon
+./gradlew testDebugUnitTest --no-daemon
+```
+
+Die GitHub-Actions-Pipeline führt dieselben beiden Gradle-Aufgaben aus und veröffentlicht anschließend das Artefakt `LLM-Lab-Standalone-Debug-APK`. Die Tests umfassen JVM-/Robolectric-Tests; sie ersetzen keine Tests auf dem tatsächlichen Android-Zielgerät.
+
+## Installation und erster Modelltest
+
+1. Die APK `LLM-Lab-Standalone-debug.apk` aus dem Actions-Artefakt herunterladen und auf dem Android-Zielgerät installieren.
+2. Die Datei `qwen2.5-1.5b-instruct-q4_k_m.gguf` (ca. 1,12 GB) lokal auf dem Gerät verfügbar machen.
+3. In LLM Lab den Bereich **Modell** öffnen und die GGUF-Datei über den System-Dateiauswahldialog auswählen.
+4. Die angezeigte Datei-/GGUF-Information prüfen und **Initialisieren** starten.
+5. Erst bei Status **Modell bereit** den Kurztest im Prompt-Labor ausführen.
+6. Danach Chat, JSON-/Extraktionstests, Abbruchtests und zuletzt den 20-fachen Benchmark durchführen.
+7. Bei Fehlern TXT- und JSON-Diagnoseexport erzeugen. Chat-Prompt und Chat-Antwort werden in der lokalen Testhistorie redigiert gespeichert.
+
+## Inferenzmesswerte
+
+Die JNI-Schicht liefert tatsächliche Werte aus `llama.cpp`: Prompt-Tokenisierung, Prompt-Tokenanzahl, Prompt-Evaluierungsdauer, Prompt-Decode-Aufrufe, First-Token-Latenz, generierte Tokens, Generierungsdauer, Generierungs-Decode-Aufrufe, Gesamtdauer und Tokens/s. Es werden keine aus Prompt-Länge geschätzten Tokenzahlen oder simulierten Antworttexte als Inferenz ausgegeben.
+
+Der Prompt-Callback meldet Fortschritt während der Prompt-Auswertung. Während der eigentlichen Token-Generierung wird der echte Token-Stream angezeigt. Gerätemesswerte, die Android nicht zuverlässig bereitstellt, müssen als nicht verfügbar behandelt werden. Der native Allocator-Heap umfasst nicht zwingend alle per `mmap` eingeblendeten Modellgewichte.
+
+## Testprofile
+
+`n_ubatch` ist auf `1`, `4`, `8`, `16` und `32` einstellbar. Zusätzlich sind `n_ctx`, `n_batch`, `n_threads`, Temperatur, maximale Tokens und die Zeitlimits konfigurierbar. Die Standardprofile sind Balanced, Power Saver und Max Throughput.
+
+Das Prompt-Labor prüft nicht nur, ob die native Engine beendet wurde, sondern wertet die tatsächliche Antwort aus: exaktes `OK`, zweisätzige deutsche Erklärung, JSON-Felder mit expliziten `null`-Werten, Briefextraktion inklusive Datum/Betrag, Halluzinationstest und drei Themenpunkte im Langtext. Der 10x-Test dokumentiert die einzelnen Antworten und deren Varianz.
+
+Der Stresstest führt bis zu 20 echte Inferenzläufe aus und wertet nur exakt passende `OK`-Antworten als inhaltlich erfolgreich. Timeout, nativer Fehler oder eine falsche Antwort beenden den Lauf automatisch.
+
+## Abbruch- und Timeout-Verhalten
+
+Die Kotlin-Schicht sendet bei manuellem Abbruch oder Timeout ein natives Abbruchsignal; `llama.cpp` erhält einen Abort-Callback. Vorgesehene Timeouts: Modellinitialisierung 120 s, Kurztest 30 s, normale Inferenz 90 s, Stresstest je Lauf 120 s.
+
+Wichtige technische Grenze: Ein nativer C/C++-Aufruf kann von Kotlin nicht sicher zwangsweise beendet werden. Reagiert die native Operation 10 Sekunden nach dem Abbruchsignal weiterhin nicht, markiert die App die Engine als nicht mehr antwortfähig, blockiert weitere Engine-Operationen und fordert einen Neustart der App. Das ist ein diagnostizierter Fehlerzustand, kein erfolgreicher Abbruch. Ob die reale Zielgeräte-/llama.cpp-Kombination innerhalb des Grenzwerts reagiert, muss auf dem Smartphone geprüft werden.
+
+## Abnahmestatus
+
+Ein grüner GitHub-Actions-Lauf beweist nur, dass die Android-App und die native Bibliothek kompiliert werden und die vorhandenen JVM-/Robolectric-Tests bestehen. Er beweist ausdrücklich **nicht**, dass das Qwen-GGUF-Modell auf dem Zielgerät lädt oder dort echte Tokens generiert.
+
+Vor Übergabe an `myDocAnizer-Mobile` sind auf dem tatsächlichen Smartphone mindestens folgende Punkte zu protokollieren:
+
+- [ ] Modellinitialisierung mit dem angegebenen Qwen-GGUF erfolgreich, Status erst danach `Modell bereit`.
+- [ ] Kurztest liefert tatsächlich exakt `OK`.
+- [ ] Deutscher Test, JSON-Test und Extraktion bestehen die inhaltliche Validierung.
+- [ ] Tokenisierung, Prompt-Eval und Generierung zeigen plausible native Messwerte.
+- [ ] Manueller Abbruch und jede Timeout-Klasse kehren innerhalb der festgelegten Grenzen zurück.
+- [ ] Nach Abbruch kann unmittelbar eine neue Inferenz gestartet werden.
+- [ ] 20 aufeinanderfolgende Tests laufen ohne Hänger; Erfolgs-/Fehler-/Timeout-Zahlen, Mittelwert, p50 und p95 werden dokumentiert.
+- [ ] TXT- und JSON-Export sind auf dem Smartphone erzeugt und enthalten Modell-/Engine-Version, Parameter und Testresultate.
+
+Bis diese Zielgerätetests durchgeführt und dokumentiert sind, ist der Prototyp **buildfähig mit integrierter llama.cpp-Engine**, aber noch nicht als auf dem Smartphone funktionsfähig abgenommen.
