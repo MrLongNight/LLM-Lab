@@ -252,23 +252,34 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
 
     llama_kv_cache_clear(llama_ctx_ptr);
 
-    // Qwen- und andere Instruct-Modelle erhalten nach Möglichkeit ihr GGUF-Chat-Template.
+    // Give instruction-tuned models a concise, explicit system message.
+    const std::string systemPrompt =
+        "Du bist ein hilfreicher, sachlicher Assistent. Antworte in der Sprache der Nutzerfrage. "
+        "Beantworte einfache Fragen direkt und knapp in ein bis vier kurzen Saetzen. "
+        "Gehe auf die konkrete Frage ein und stelle dich nicht unaufgefordert vor. "
+        "Behaupte nicht, ein Mensch oder ein Bewusstsein zu sein. "
+        "Erfinde keine Fakten; kennzeichne Unsicherheit klar. "
+        "Befolge angeforderte Ausgabeformate exakt.";
+
     std::string formattedPrompt = prompt;
     bool addBos = true;
     bool parseSpecial = false;
-    llama_chat_message message;
-    message.role = "user";
-    message.content = prompt.c_str();
+    llama_chat_message messages[2];
+    messages[0].role = "system";
+    messages[0].content = systemPrompt.c_str();
+    messages[1].role = "user";
+    messages[1].content = prompt.c_str();
 
-    std::vector<char> templateBuffer(std::max<size_t>(1024, prompt.size() * 2 + 512));
+    std::vector<char> templateBuffer(
+        std::max<size_t>(1024, (prompt.size() + systemPrompt.size()) * 2 + 512));
     int32_t templateLength = llama_chat_apply_template(
-        llama_model_ptr, nullptr, &message, 1, true,
+        llama_model_ptr, nullptr, messages, 2, true,
         templateBuffer.data(), static_cast<int32_t>(templateBuffer.size()));
 
     if (templateLength > static_cast<int32_t>(templateBuffer.size())) {
         templateBuffer.resize(static_cast<size_t>(templateLength) + 1);
         templateLength = llama_chat_apply_template(
-            llama_model_ptr, nullptr, &message, 1, true,
+            llama_model_ptr, nullptr, messages, 2, true,
             templateBuffer.data(), static_cast<int32_t>(templateBuffer.size()));
     }
 
@@ -278,7 +289,9 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
         addBos = false;
         parseSpecial = true;
     } else {
-        LOGW("Kein anwendbares llama.cpp Chat-Template gefunden; Prompt wird roh tokenisiert");
+        // Retain the instruction prefix for custom templates without system-role support.
+        LOGW("GGUF Chat-Template unterstuetzt keine Systemrolle; verwende Text-Prefix");
+        formattedPrompt = systemPrompt + "\n\nNutzerfrage:\n" + prompt + "\n\nAntwort:";
     }
 
     const int64_t tokenizeStartUs = llama_time_us();
@@ -409,6 +422,15 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
     }
 
     const int32_t maxTokens = std::max(1, config.max_tokens);
+    // Allocate generation buffers once instead of rebuilding a full-vocabulary vector per token.
+    std::vector<llama_token_data> candidates(static_cast<size_t>(vocabSize));
+    std::vector<llama_token> recentTokens;
+    const size_t repeatWindow = 64;
+    const size_t initialRecent = std::min(repeatWindow, promptTokens.size());
+    recentTokens.insert(promptTokens.end() - static_cast<std::ptrdiff_t>(initialRecent), promptTokens.end());
+    std::vector<char> pieceBuffer(256);
+
+    LOGI("Sampler: temperature=%.2f top_k=40 top_p=0.90 repeat_penalty=1.08", config.temperature);
     for (int32_t generated = 0; generated < maxTokens; ++generated) {
         if (isAbortRequested()) {
             metrics.finish_reason = "ABORTED_BY_USER";
@@ -422,19 +444,23 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
             return finish();
         }
 
-        std::vector<llama_token_data> candidates;
-        candidates.reserve(static_cast<size_t>(vocabSize));
-        for (llama_token token = 0; token < vocabSize; ++token) {
-            candidates.push_back(llama_token_data{token, logits[token], 0.0f});
+        // Samplers may reorder candidates; restore IDs and refresh logit/probability values.
+        for (int32_t token = 0; token < vocabSize; ++token) {
+            candidates[static_cast<size_t>(token)].id = token;
+            candidates[static_cast<size_t>(token)].logit = logits[token];
+            candidates[static_cast<size_t>(token)].p = 0.0f;
         }
-        llama_token_data_array candidatesArray{
-            candidates.data(), candidates.size(), false
-        };
+        llama_token_data_array candidatesArray{candidates.data(), candidates.size(), false};
+        llama_sample_repetition_penalties(
+            llama_ctx_ptr, &candidatesArray, recentTokens.data(), recentTokens.size(),
+            1.08f, 0.0f, 0.0f);
 
         llama_token sampledToken;
         if (config.temperature <= 0.0f) {
             sampledToken = llama_sample_token_greedy(llama_ctx_ptr, &candidatesArray);
         } else {
+            llama_sample_top_k(llama_ctx_ptr, &candidatesArray, 40, 1);
+            llama_sample_top_p(llama_ctx_ptr, &candidatesArray, 0.90f, 1);
             llama_sample_temp(llama_ctx_ptr, &candidatesArray, config.temperature);
             llama_sample_softmax(llama_ctx_ptr, &candidatesArray);
             sampledToken = llama_sample_token(llama_ctx_ptr, &candidatesArray);
@@ -445,15 +471,14 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
             break;
         }
 
-        std::vector<char> pieceBuffer(256);
         int32_t pieceSize = llama_token_to_piece(
             llama_model_ptr, sampledToken, pieceBuffer.data(),
-            static_cast<int32_t>(pieceBuffer.size()), 0, true);
+            static_cast<int32_t>(pieceBuffer.size()), 0, false);
         if (pieceSize < 0) {
             pieceBuffer.resize(static_cast<size_t>(-pieceSize));
             pieceSize = llama_token_to_piece(
                 llama_model_ptr, sampledToken, pieceBuffer.data(),
-                static_cast<int32_t>(pieceBuffer.size()), 0, true);
+                static_cast<int32_t>(pieceBuffer.size()), 0, false);
         }
         if (pieceSize < 0) {
             setNativeError(metrics, "llama_token_to_piece konnte einen Token nicht dekodieren");
@@ -465,6 +490,8 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
             static_cast<size_t>(std::max<int32_t>(0, pieceSize)));
 
         metrics.generated_tokens++;
+        recentTokens.push_back(sampledToken);
+        if (recentTokens.size() > repeatWindow) recentTokens.erase(recentTokens.begin());
         if (metrics.first_token_time_us == 0) {
             metrics.first_token_time_us = std::max<int64_t>(0, llama_time_us() - totalStartUs);
         }
@@ -527,7 +554,7 @@ extern "C" {
 JNIEXPORT jstring JNICALL
 Java_com_example_engine_LlamaNativeBridge_nativeGetVersion(JNIEnv* env, jobject /* this */) {
     const std::string version = std::string("llama.cpp ") + LLAMACPP_TARGET_VERSION +
-                                " (" + LLAMACPP_COMMIT_HASH + "), CPU backend";
+                                " (" + LLAMACPP_COMMIT_HASH + "), CPU backend, optimized -O3";
     return env->NewStringUTF(version.c_str());
 }
 

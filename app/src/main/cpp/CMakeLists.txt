@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.22.1)
 project("llmlab_native" LANGUAGES C CXX)
 
+# Optimize native inference kernels even inside the installable debug APK.
+# This directory-level option is inherited by the pinned llama.cpp subproject.
+add_compile_options(-O3 -DNDEBUG)
+
 # llama.cpp is pinned as a Git submodule. Only its CPU backend is built.
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)

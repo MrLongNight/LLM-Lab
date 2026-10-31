@@ -17,7 +17,7 @@ struct NativeInferenceConfig {
     int n_batch = 512;
     int n_ubatch = 8;
     int n_threads = 4;
-    float temperature = 0.7f;
+    float temperature = 0.25f;
     int max_tokens = 512;
 };
 
