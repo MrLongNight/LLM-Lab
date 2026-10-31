@@ -54,6 +54,9 @@ class LlamaNativeBridge {
         if (isNativeLibraryLoaded && engineHandle != 0L) {
             try {
                 nativeResetAbort(engineHandle)
+                // Ein während des synchronisierten Resets eintreffender Nutzer- oder
+                // Timeout-Abbruch wird direkt danach erneut an C++ weitergereicht.
+                if (abortFlag.get()) nativeRequestAbort(engineHandle)
             } catch (t: Throwable) {
                 Log.e(TAG, "Abort-Zustand konnte nicht zurückgesetzt werden: ${t.message}", t)
             }
@@ -67,6 +70,10 @@ class LlamaNativeBridge {
     ): Boolean {
         if (!isNativeLibraryLoaded || engineHandle == 0L) {
             outError[0] = "Native llama.cpp Engine nicht verfügbar. Es wird kein JVM-Fallback verwendet."
+            return false
+        }
+        if (abortFlag.get()) {
+            outError[0] = "Modellinitialisierung vor dem JNI-Aufruf abgebrochen."
             return false
         }
         return try {
@@ -116,6 +123,10 @@ class LlamaNativeBridge {
     ): NativeMetrics {
         if (!isNativeLibraryLoaded || engineHandle == 0L) {
             return unavailableMetrics("Native llama.cpp Engine nicht verfügbar. Keine Inferenz ausgeführt.")
+        }
+        if (abortFlag.get()) {
+            return unavailableMetrics("Inference wurde vor dem JNI-Aufruf abgebrochen.")
+                .copy(finishReason = "ABORTED_BY_USER")
         }
         return try {
             nativeExecuteInference(

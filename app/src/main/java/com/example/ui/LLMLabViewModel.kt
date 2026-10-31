@@ -575,6 +575,10 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             for (repetition in 1..testCase.repetitionCount) {
+                if (nativeBridge.isAbortRequested()) {
+                    _labTestOutput.value = "Testlauf durch Nutzer abgebrochen."
+                    break
+                }
                 val localStream = StringBuilder()
                 val callback = object : InferenceCallback {
                     override fun onToken(tokenText: String, tokenIndex: Int) {
@@ -673,6 +677,10 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
 
             var stopReason: String? = null
             for (iteration in 1..20) {
+                if (nativeBridge.isAbortRequested()) {
+                    stopReason = "Durch Nutzer abgebrochen."
+                    break
+                }
                 _benchmarkSummary.value = _benchmarkSummary.value.copy(
                     currentIteration = iteration
                 )
