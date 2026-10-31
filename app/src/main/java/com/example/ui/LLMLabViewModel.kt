@@ -631,31 +631,36 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             _labTestOutput.value = "Testlauf gestartet..."
             _labMetrics.value = null
 
-            val isShortTest = testCase.id == "TEST_1_OK"
-            val timeoutSeconds = if (isShortTest) {
+            val timeoutSeconds = if (testCase.id == "TEST_1_OK") {
                 _config.value.timeoutShortTestSec
             } else {
                 testCase.timeoutSec
             }
+            val outcomes = mutableListOf<Triple<Int, String, com.example.engine.PromptValidationResult>>()
+            var stopReason: String? = null
 
             for (repetition in 1..testCase.repetitionCount) {
                 if (nativeBridge.isAbortRequested()) {
-                    _labTestOutput.value = "Testlauf durch Nutzer abgebrochen."
+                    stopReason = "Testlauf durch Nutzer abgebrochen."
                     break
                 }
+
                 val localStream = StringBuilder()
                 val callback = object : InferenceCallback {
                     override fun onToken(tokenText: String, tokenIndex: Int) {
                         localStream.append(tokenText)
-                        _labTestOutput.value = if (testCase.repetitionCount > 1) {
-                            "Wiederholung $repetition / ${testCase.repetitionCount}:\n${localStream}"
-                        } else {
-                            localStream.toString()
-                        }
+                        val prefix = if (testCase.repetitionCount > 1) {
+                            "Wiederholung ${repetition} / ${testCase.repetitionCount}\n"
+                        } else ""
+                        _labTestOutput.value = prefix + localStream.toString()
                     }
 
                     override fun onProgress(progressPercent: Float, step: Int) {
-                        // Fortschritt stammt aus llama.cpp Prompt-Decode-Callbacks.
+                        val prefix = if (testCase.repetitionCount > 1) {
+                            "Wiederholung ${repetition} / ${testCase.repetitionCount}\n"
+                        } else ""
+                        _labTestOutput.value = prefix +
+                            "Prompt-Evaluierung: ${progressPercent.toInt()}% (nativer Decode-Aufruf ${step})"
                     }
                 }
 
@@ -667,18 +672,24 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 _labMetrics.value = metrics
 
-                val succeeded = metrics.finishReason == "STOP_TOKEN" ||
-                    metrics.finishReason == "MAX_TOKENS"
+                val response = localStream.toString()
+                val inferenceCompleted =
+                    (metrics.finishReason == "STOP_TOKEN" || metrics.finishReason == "MAX_TOKENS") &&
+                        metrics.generatedTokens > 0
+                val validation = PromptResultValidator.validate(testCase, response)
+                outcomes.add(Triple(repetition, response, validation))
+                val runSucceeded = inferenceCompleted && validation.passed
+                val runError = metrics.errorMessage ?: if (inferenceCompleted && !validation.passed) {
+                    "Inhaltliche Prüfung fehlgeschlagen: ${validation.details}"
+                } else null
 
                 dao.insertRun(TestRunEntity(
                     testCategory = testCase.id,
                     testTitle = if (testCase.repetitionCount > 1) {
                         "${testCase.title} (#$repetition)"
-                    } else {
-                        testCase.title
-                    },
+                    } else testCase.title,
                     promptText = testCase.prompt,
-                    responseText = localStream.toString(),
+                    responseText = response,
                     promptTokens = metrics.promptTokens,
                     generatedTokens = metrics.generatedTokens,
                     promptEvalDurationMs = metrics.promptEvalDurationMs,
@@ -690,8 +701,8 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     nUbatch = _config.value.nUbatch,
                     nThreads = _config.value.nThreads,
                     finishReason = metrics.finishReason,
-                    isSuccess = succeeded,
-                    errorMessage = metrics.errorMessage,
+                    isSuccess = runSucceeded,
+                    errorMessage = runError,
                     modelName = readyState.fileName,
                     promptTokenizeDurationMs = metrics.promptTokenizeDurationMs,
                     firstTokenDurationMs = metrics.firstTokenDurationMs,
@@ -699,20 +710,50 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     generationDecodeCalls = metrics.generationDecodeCalls
                 ))
 
-                if (!succeeded) {
+                if (!inferenceCompleted) {
+                    stopReason = "Inferenz nicht erfolgreich: ${metrics.finishReason}. ${metrics.errorMessage.orEmpty()}"
                     if (metrics.finishReason == "NATIVE_ERROR") {
                         nativeBridge.unloadModel()
                         _modelState.value = ModelLifecycleState.Error(
                             metrics.errorMessage ?: "Native Engine-Fehler"
                         )
-                    } else {
+                    } else if (!nativeEngineUnresponsive.get()) {
                         _modelState.value = readyState
-                    }
-                    if (localStream.isEmpty()) {
-                        _labTestOutput.value = "Keine Antwort. Status: ${metrics.finishReason}\n${metrics.errorMessage.orEmpty()}"
                     }
                     break
                 }
+
+                // Inhaltliche Abweichungen im 10x-Test protokollieren, aber alle
+                // zehn realen Modellläufe ausführen, um Varianz sichtbar zu machen.
+                if (!validation.passed && testCase.repetitionCount == 1) break
+            }
+
+            if (outcomes.isNotEmpty()) {
+                if (testCase.repetitionCount > 1) {
+                    val passedCount = outcomes.count { it.third.passed }
+                    val distinctAnswers = outcomes.map { it.second.trim() }.distinct().size
+                    val details = outcomes.joinToString("\n\n") { (number, response, validation) ->
+                        val resultLabel = if (validation.passed) "BESTANDEN" else "FEHLGESCHLAGEN"
+                        "Durchlauf #$number [$resultLabel]: ${validation.details}\nAntwort: $response"
+                    }
+                    val earlyStop = if (outcomes.size < testCase.repetitionCount) {
+                        "\n\nVorzeitig beendet nach ${outcomes.size}/${testCase.repetitionCount} Durchläufen."
+                    } else ""
+                    _labTestOutput.value =
+                        "10er-Wiederholung: $passedCount/${outcomes.size} inhaltlich korrekt\n" +
+                            "Unterschiedliche Antworten: $distinctAnswers$earlyStop\n\n$details"
+                } else {
+                    val outcome = outcomes.last()
+                    val label = if (outcome.third.passed) "BESTANDEN" else "FEHLGESCHLAGEN"
+                    _labTestOutput.value =
+                        "Inhaltstest: $label\n${outcome.third.details}\n\nModellantwort:\n${outcome.second}"
+                }
+            } else if (stopReason != null) {
+                _labTestOutput.value = stopReason
+            }
+
+            if (stopReason != null && _labTestOutput.value.isNotBlank()) {
+                _labTestOutput.value += "\n\n$stopReason"
             }
 
             _labActiveTest.value = null
