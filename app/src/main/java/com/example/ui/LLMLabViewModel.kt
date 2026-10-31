@@ -514,16 +514,16 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
+        val userMsg = ChatMessage(isUser = true, text = promptText)
         val currentConfig = _config.value
         if (!readyState.loadedConfig.hasSameNativeContext(currentConfig)) {
-            _chatMessages.value = _chatMessages.value + ChatMessage(
+            _chatMessages.value = _chatMessages.value + userMsg + ChatMessage(
                 isUser = false,
                 text = "Context-Parameter geändert. Bitte im Bereich Modell Erneut laden auswählen, bevor eine neue Inferenz startet."
             )
             return
         }
 
-        val userMsg = ChatMessage(isUser = true, text = promptText)
         val assistantPlaceholderId = java.util.UUID.randomUUID().toString()
         val assistantPlaceholder = ChatMessage(
             id = assistantPlaceholderId,

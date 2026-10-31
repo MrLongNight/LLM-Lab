@@ -222,8 +222,8 @@ class ExampleRobolectricTest {
         viewModel.sendChatMessage("Teste mit geänderten Context-Parametern")
 
         val messages = viewModel.chatMessages.value
-        assertEquals(2, messages.size)
-        assertFalse(messages.any { it.isUser })
+        assertEquals(3, messages.size)
+        assertTrue(messages[1].isUser)
         assertFalse(messages.any { it.isStreaming })
         assertTrue(messages.last().text.contains("Context-Parameter geändert"))
     }
