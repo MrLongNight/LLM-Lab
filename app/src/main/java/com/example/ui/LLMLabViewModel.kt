@@ -104,7 +104,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
 
     private val db = AppDatabase.getInstance(application)
     private val dao = db.testRunDao()
-    private val nativeBridge = LlamaNativeBridge()
+    private val nativeBridge = LlamaNativeBridge(application.applicationInfo.nativeLibraryDir)
 
     private val _currentTab = MutableStateFlow(0)
     val currentTab: StateFlow<Int> = _currentTab.asStateFlow()
