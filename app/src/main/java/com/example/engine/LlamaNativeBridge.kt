@@ -3,7 +3,7 @@ package com.example.engine
 import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 
-class LlamaNativeBridge(private val nativeLibraryDir: String) {
+class LlamaNativeBridge(private val nativeLibraryDir: String?) {
 
     companion object {
         private const val TAG = "LlamaNativeBridge"
@@ -27,13 +27,18 @@ class LlamaNativeBridge(private val nativeLibraryDir: String) {
 
     init {
         if (isNativeLibraryLoaded) {
-            try {
-                engineHandle = nativeCreateEngine(nativeLibraryDir)
-                if (engineHandle == 0L) {
-                    Log.e(TAG, "nativeCreateEngine lieferte einen ungültigen Handle")
+            val libraryDir = nativeLibraryDir?.takeIf { it.isNotBlank() }
+            if (libraryDir == null) {
+                Log.w(TAG, "Native Engine nicht initialisiert: nativeLibraryDir ist nicht verfügbar")
+            } else {
+                try {
+                    engineHandle = nativeCreateEngine(libraryDir)
+                    if (engineHandle == 0L) {
+                        Log.e(TAG, "nativeCreateEngine lieferte einen ungültigen Handle")
+                    }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Native Engine konnte nicht instanziiert werden: ${t.message}", t)
                 }
-            } catch (t: Throwable) {
-                Log.e(TAG, "Native Engine konnte nicht instanziiert werden: ${t.message}", t)
             }
         }
     }
