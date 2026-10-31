@@ -123,7 +123,7 @@ class ExampleRobolectricTest {
 
         // Preset-Wechsel testen
         viewModel.setProfilePreset(ProfilePreset.POWER_SAVER)
-        assertEquals(4, viewModel.config.value.nUbatch)
+        assertEquals(8, viewModel.config.value.nUbatch)
 
         viewModel.setProfilePreset(ProfilePreset.MAX_THROUGHPUT)
         assertEquals(32, viewModel.config.value.nUbatch)
