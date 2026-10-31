@@ -1,16 +1,15 @@
 package com.example.engine
 
-import android.content.ClipData
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.os.Build
-import androidx.core.content.FileProvider
+import android.os.Environment
+import android.content.ContentValues
+import android.provider.MediaStore
+import java.io.IOException
 import com.example.BuildConfig
 import com.example.data.TestRunEntity
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -184,44 +183,72 @@ object ExportManager {
         return sb.toString()
     }
 
-    internal fun createChooserIntent(sendIntent: Intent, title: String): Intent =
-        Intent.createChooser(sendIntent, title).apply {
-            // The ViewModel uses Application context; NEW_TASK is required for startActivity.
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-
-    fun shareExport(context: Context, content: String, fileName: String, mimeType: String) {
-        val exportDir = File(context.cacheDir, "exports")
-        if (!exportDir.exists() && !exportDir.mkdirs()) {
-            throw java.io.IOException("Exportverzeichnis konnte nicht erstellt werden: ${exportDir.absolutePath}")
-        }
+    internal fun sanitizeExportFileName(fileName: String): String {
         val safeName = fileName.substringAfterLast('/').substringAfterLast('\\')
         require(safeName.matches(Regex("[A-Za-z0-9._-]{1,120}"))) { "Ungültiger Exportdateiname" }
-        val file = File(exportDir, safeName)
-        file.writeText(content, Charsets.UTF_8)
-        if (!file.isFile || file.length() == 0L) {
-            throw java.io.IOException("Exportdatei wurde nicht korrekt geschrieben.")
+        return safeName
+    }
+
+    /**
+     * Saves directly to public Downloads through MediaStore.
+     * No FileProvider, chooser or external activity is needed.
+     * minSdk 29 guarantees scoped-storage support.
+     */
+    fun saveExportToDownloads(context: Context, content: String, fileName: String, mimeType: String): String {
+        val safeName = sanitizeExportFileName(fileName)
+        val resolver = context.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, safeName)
+            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/LLM Lab")
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
 
-        exportDir.listFiles()
-            ?.filter { it != file && System.currentTimeMillis() - it.lastModified() > 24L * 60L * 60L * 1000L }
-            ?.forEach { it.delete() }
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: throw IOException("Android konnte keinen Eintrag im Downloads-Ordner anlegen.")
 
-        val uri: Uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            file
-        )
+        try {
+            val bytes = content.toByteArray(Charsets.UTF_8)
+            if (bytes.isEmpty()) throw IOException("Der Diagnosebericht ist leer.")
+            val output = resolver.openOutputStream(uri, "w")
+                ?: throw IOException("Android konnte den Diagnosebericht nicht zum Schreiben öffnen.")
+            output.use { stream ->
+                stream.write(bytes)
+                stream.flush()
+            }
 
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = mimeType
-            putExtra(Intent.EXTRA_STREAM, uri)
-            clipData = ClipData.newUri(context.contentResolver, safeName, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            val ready = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+            if (resolver.update(uri, ready, null, null) <= 0) {
+                throw IOException("Android konnte den Downloads-Eintrag nicht abschließen.")
+            }
+            return "Downloads/LLM Lab/$safeName"
+        } catch (error: Throwable) {
+            runCatching { resolver.delete(uri, null, null) }
+            throw error
         }
-        val chooser = createChooserIntent(intent, "Diagnosebericht exportieren").apply {
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+
+    /** Durable emergency copy if public Downloads cannot be written. */
+    fun saveInternalFallback(context: Context, content: String, fileName: String): String {
+        val safeName = sanitizeExportFileName(fileName)
+        val directory = java.io.File(context.filesDir, "exports")
+        if (!directory.exists() && !directory.mkdirs()) {
+            throw IOException("Interner Exportordner konnte nicht erstellt werden.")
         }
-        context.startActivity(chooser)
+        val target = java.io.File(directory, safeName)
+        val part = java.io.File(directory, "$safeName.part")
+        java.io.FileOutputStream(part).use { stream ->
+            stream.write(content.toByteArray(Charsets.UTF_8))
+            stream.fd.sync()
+        }
+        if (target.exists() && !target.delete()) {
+            part.delete()
+            throw IOException("Vorhandene interne Exportdatei konnte nicht ersetzt werden.")
+        }
+        if (!part.renameTo(target)) {
+            part.delete()
+            throw IOException("Interne Exportdatei konnte nicht finalisiert werden.")
+        }
+        return target.absolutePath
     }
 }
