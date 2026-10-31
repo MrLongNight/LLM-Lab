@@ -14,10 +14,10 @@ class LlamaNativeBridge {
             try {
                 System.loadLibrary("llmlab_native")
                 isNativeLibraryLoaded = true
-                Log.i(TAG, "Native library libllmlab_native.so erfolgreich geladen")
+                Log.i(TAG, "Native llama.cpp Bibliothek erfolgreich geladen")
             } catch (t: Throwable) {
                 isNativeLibraryLoaded = false
-                Log.w(TAG, "libllmlab_native.so nicht geladen (z.B. JVM/Robolectric Testumgebung): ${t.message}")
+                Log.e(TAG, "Native llama.cpp Bibliothek nicht verfügbar: ${t.message}", t)
             }
         }
     }
@@ -29,21 +29,23 @@ class LlamaNativeBridge {
         if (isNativeLibraryLoaded) {
             try {
                 engineHandle = nativeCreateEngine()
-            } catch (e: Throwable) {
-                Log.e(TAG, "Konnte native Engine nicht instanziieren: ${e.message}")
+                if (engineHandle == 0L) {
+                    Log.e(TAG, "nativeCreateEngine lieferte einen ungültigen Handle")
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "Native Engine konnte nicht instanziiert werden: ${t.message}", t)
             }
         }
     }
 
     fun getEngineVersion(): String {
-        return if (isNativeLibraryLoaded && engineHandle != 0L) {
-            try {
-                nativeGetVersion()
-            } catch (_: Throwable) {
-                "llama.cpp-b3600-android-arm64 (7e2a91df)"
-            }
-        } else {
-            "llama.cpp-b3600-android-arm64 (JVM-Host Environment)"
+        if (!isNativeLibraryLoaded || engineHandle == 0L) {
+            return "Nicht verfügbar: native llama.cpp Bibliothek wurde nicht geladen"
+        }
+        return try {
+            nativeGetVersion()
+        } catch (t: Throwable) {
+            "Nicht verfügbar: ${t.message}"
         }
     }
 
@@ -53,39 +55,34 @@ class LlamaNativeBridge {
         outError: Array<String?>
     ): Boolean {
         abortFlag.set(false)
-        if (isNativeLibraryLoaded && engineHandle != 0L) {
-            return try {
-                nativeLoadModel(
-                    engineHandle,
-                    modelPath,
-                    config.nCtx,
-                    config.nBatch,
-                    config.nUbatch,
-                    config.nThreads,
-                    outError
-                )
-            } catch (t: Throwable) {
-                outError[0] = "Native Ausnahme beim Laden: ${t.message}"
-                false
-            }
-        } else {
-            // JVM-Validierungsprüfung (z.B. Robolectric Unit Tests)
-            val file = java.io.File(modelPath)
-            if (!file.exists()) {
-                outError[0] = "Datei existiert nicht: $modelPath"
-                return false
-            }
-            return true
+        if (!isNativeLibraryLoaded || engineHandle == 0L) {
+            outError[0] = "Native llama.cpp Engine nicht verfügbar. Es wird kein JVM-Fallback verwendet."
+            return false
+        }
+        return try {
+            nativeResetAbort(engineHandle)
+            nativeLoadModel(
+                engineHandle,
+                modelPath,
+                config.nCtx,
+                config.nBatch,
+                config.nUbatch,
+                config.nThreads,
+                outError
+            )
+        } catch (t: Throwable) {
+            outError[0] = "Native Ausnahme beim Laden: ${t.message}"
+            false
         }
     }
 
     fun unloadModel() {
-        abortFlag.set(true)
+        requestAbort()
         if (isNativeLibraryLoaded && engineHandle != 0L) {
             try {
                 nativeUnloadModel(engineHandle)
             } catch (t: Throwable) {
-                Log.e(TAG, "Fehler beim nativen Entladen: ${t.message}")
+                Log.e(TAG, "Fehler beim nativen Entladen: ${t.message}", t)
             }
         }
     }
@@ -96,7 +93,7 @@ class LlamaNativeBridge {
             try {
                 nativeRequestAbort(engineHandle)
             } catch (t: Throwable) {
-                Log.e(TAG, "Fehler bei nativer Abort-Anforderung: ${t.message}")
+                Log.e(TAG, "Fehler beim nativen Abbruchsignal: ${t.message}", t)
             }
         }
     }
@@ -108,104 +105,47 @@ class LlamaNativeBridge {
         config: InferenceConfig,
         callback: InferenceCallback
     ): NativeMetrics {
-        abortFlag.set(false)
-        if (isNativeLibraryLoaded && engineHandle != 0L) {
-            return try {
-                nativeExecuteInference(
-                    engineHandle,
-                    prompt,
-                    config.nCtx,
-                    config.nBatch,
-                    config.nUbatch,
-                    config.nThreads,
-                    config.temperature,
-                    config.maxTokens,
-                    callback
-                )
-            } catch (t: Throwable) {
-                NativeMetrics(
-                    promptTokens = prompt.length / 4,
-                    generatedTokens = 0,
-                    promptEvalDurationMs = 0,
-                    generationDurationMs = 0,
-                    totalDurationMs = 0,
-                    decodeCalls = 0,
-                    tokensPerSecond = 0f,
-                    finishReason = "NATIVE_ERROR",
-                    errorMessage = "JNI Ausführungsfehler: ${t.message}"
-                )
-            }
-        } else {
-            // Strukturierter Durchlauf für JVM / Robolectric Tests
-            val startTime = System.currentTimeMillis()
-            val promptTokens = (prompt.length / 3.5).toInt().coerceAtLeast(1)
-
-            val batchSteps = (promptTokens / config.nUbatch.coerceAtLeast(1)).coerceAtLeast(1)
-            for (step in 1..batchSteps) {
-                if (abortFlag.get()) {
-                    return NativeMetrics(
-                        promptTokens = promptTokens,
-                        generatedTokens = 0,
-                        promptEvalDurationMs = System.currentTimeMillis() - startTime,
-                        generationDurationMs = 0,
-                        totalDurationMs = System.currentTimeMillis() - startTime,
-                        decodeCalls = step,
-                        tokensPerSecond = 0f,
-                        finishReason = "ABORTED_BY_USER",
-                        errorMessage = "Vom Nutzer abgebrochen"
-                    )
-                }
-                callback.onProgress((step.toFloat() / batchSteps) * 100f, step)
-                Thread.sleep(1)
-            }
-
-            val evalDuration = System.currentTimeMillis() - startTime
-            val genStartTime = System.currentTimeMillis()
-
-            val tokens = when {
-                prompt.contains("OK") && prompt.length < 50 -> listOf("OK")
-                prompt.contains("JSON") || prompt.contains("documentType") -> listOf(
-                    "{\n", "  \"documentType\":", " \"Rechnung\",\n", "  \"sender\":", " \"Dr. Müller Praxis\",\n", "  \"date\":", " \"2026-03-15\"\n", "}"
-                )
-                prompt.contains("Dokumentenmanagementsystem") -> listOf(
-                    "Ein ", "Dokumentenmanagementsystem ", "dient ", "der ", "digitalen ", "Erfassung ", "und ", "Archivierung ", "von ", "Dokumenten."
-                )
-                else -> prompt.split(" ").take(20).map { "$it " }
-            }
-
-            var genCount = 0
-            for ((idx, tok) in tokens.withIndex()) {
-                if (abortFlag.get()) break
-                callback.onToken(tok, idx)
-                genCount++
-                Thread.sleep(5)
-            }
-
-            val genDuration = (System.currentTimeMillis() - genStartTime).coerceAtLeast(1)
-            val totalDuration = evalDuration + genDuration
-            val tps = (genCount * 1000f) / genDuration
-
-            return NativeMetrics(
-                promptTokens = promptTokens,
-                generatedTokens = genCount,
-                promptEvalDurationMs = evalDuration,
-                generationDurationMs = genDuration,
-                totalDurationMs = totalDuration,
-                decodeCalls = batchSteps + genCount,
-                tokensPerSecond = tps,
-                finishReason = if (abortFlag.get()) "ABORTED_BY_USER" else "STOP_TOKEN"
-            )
+        if (!isNativeLibraryLoaded || engineHandle == 0L) {
+            return unavailableMetrics("Native llama.cpp Engine nicht verfügbar. Keine Inferenz ausgeführt.")
+        }
+        return try {
+            abortFlag.set(false)
+            nativeResetAbort(engineHandle)
+            nativeExecuteInference(
+                engineHandle,
+                prompt,
+                config.nCtx,
+                config.nBatch,
+                config.nUbatch,
+                config.nThreads,
+                config.temperature,
+                config.maxTokens,
+                callback
+            ) ?: unavailableMetrics("JNI lieferte kein NativeMetrics-Objekt")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Native Inferenz fehlgeschlagen: ${t.message}", t)
+            unavailableMetrics("JNI-Ausführungsfehler: ${t.message}")
         }
     }
 
+    private fun unavailableMetrics(error: String) = NativeMetrics(
+        promptTokens = 0,
+        generatedTokens = 0,
+        promptEvalDurationMs = 0,
+        generationDurationMs = 0,
+        totalDurationMs = 0,
+        decodeCalls = 0,
+        tokensPerSecond = 0f,
+        finishReason = "NATIVE_ERROR",
+        errorMessage = error
+    )
+
     fun getAllocatedHeap(): Long {
-        return if (isNativeLibraryLoaded && engineHandle != 0L) {
-            try {
-                nativeGetAllocatedHeap(engineHandle)
-            } catch (_: Throwable) {
-                0L
-            }
-        } else {
+        if (!isNativeLibraryLoaded || engineHandle == 0L) return 0L
+        return try {
+            nativeGetAllocatedHeap(engineHandle)
+        } catch (t: Throwable) {
+            Log.w(TAG, "Native Heap-Messung nicht verfügbar: ${t.message}")
             0L
         }
     }
@@ -214,14 +154,14 @@ class LlamaNativeBridge {
         if (isNativeLibraryLoaded && engineHandle != 0L) {
             try {
                 nativeDestroyEngine(engineHandle)
-            } catch (_: Throwable) {
+            } catch (t: Throwable) {
+                Log.e(TAG, "Fehler beim Zerstören der Engine: ${t.message}", t)
             } finally {
                 engineHandle = 0L
             }
         }
     }
 
-    // Native Methoden-Deklarationen
     private external fun nativeGetVersion(): String
     private external fun nativeCreateEngine(): Long
     private external fun nativeDestroyEngine(handle: Long)
@@ -236,6 +176,7 @@ class LlamaNativeBridge {
     ): Boolean
     private external fun nativeUnloadModel(handle: Long)
     private external fun nativeRequestAbort(handle: Long)
+    private external fun nativeResetAbort(handle: Long)
     private external fun nativeExecuteInference(
         handle: Long,
         prompt: String,

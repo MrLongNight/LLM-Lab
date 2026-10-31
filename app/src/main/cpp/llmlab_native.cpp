@@ -1,74 +1,181 @@
 #include "llmlab_native.h"
+
 #include <android/log.h>
-#include <unistd.h>
-#include <sys/resource.h>
 #include <malloc.h>
+
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
-#include <cmath>
-#include <sstream>
-#include <thread>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
 
 #define TAG "LLMLabNative"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
+namespace {
+std::once_flag g_backend_init_once;
+
+class ScopedBatch {
+public:
+    explicit ScopedBatch(int32_t capacity)
+        : batch_(llama_batch_init(std::max<int32_t>(1, capacity), 0, 1)) {}
+
+    ~ScopedBatch() {
+        llama_batch_free(batch_);
+    }
+
+    llama_batch& get() { return batch_; }
+
+    bool valid() const {
+        return batch_.token != nullptr &&
+               batch_.pos != nullptr &&
+               batch_.n_seq_id != nullptr &&
+               batch_.seq_id != nullptr &&
+               batch_.logits != nullptr;
+    }
+
+private:
+    llama_batch batch_{};
+};
+
+void setNativeError(NativeGenerationMetrics& metrics, const std::string& message) {
+    metrics.finish_reason = "NATIVE_ERROR";
+    metrics.error_message = message;
+}
+} // namespace
+
 NativeLlamaEngine::NativeLlamaEngine() {
+    std::call_once(g_backend_init_once, []() {
+        llama_backend_init();
+        LOGI("llama.cpp Backend initialisiert");
+    });
     abort_flag.store(false);
     is_model_loaded.store(false);
-    LOGI("NativeLlamaEngine instanziiert");
 }
 
 NativeLlamaEngine::~NativeLlamaEngine() {
     unloadModel();
 }
 
-bool NativeLlamaEngine::loadModel(const std::string& path, const NativeInferenceConfig& config, std::string& outError) {
-    unloadModel();
-    abort_flag.store(false);
+bool NativeLlamaEngine::modelLoadProgress(float progress, void* userData) {
+    (void)progress;
+    auto* engine = static_cast<NativeLlamaEngine*>(userData);
+    return engine != nullptr && !engine->isAbortRequested();
+}
+
+bool NativeLlamaEngine::abortCallback(void* userData) {
+    auto* engine = static_cast<NativeLlamaEngine*>(userData);
+    return engine == nullptr || engine->isAbortRequested();
+}
+
+void NativeLlamaEngine::clearModelLocked() {
+    is_model_loaded.store(false);
+    if (llama_ctx_ptr != nullptr) {
+        llama_free(llama_ctx_ptr);
+        llama_ctx_ptr = nullptr;
+    }
+    if (llama_model_ptr != nullptr) {
+        llama_free_model(llama_model_ptr);
+        llama_model_ptr = nullptr;
+    }
+    loaded_model_path.clear();
+}
+
+bool NativeLlamaEngine::loadModel(
+    const std::string& path,
+    const NativeInferenceConfig& config,
+    std::string& outError
+) {
+    std::lock_guard<std::mutex> lock(engine_mutex);
+    clearModelLocked();
+
+    if (isAbortRequested()) {
+        outError = "Modellinitialisierung vor dem Start abgebrochen";
+        return false;
+    }
+
     active_config = config;
-    loaded_model_path = path;
 
-    LOGI("Lade Modell: %s (n_ctx=%d, n_batch=%d, n_ubatch=%d, threads=%d)",
-         path.c_str(), config.n_ctx, config.n_batch, config.n_ubatch, config.n_threads);
+    llama_model_params modelParams = llama_model_default_params();
+    modelParams.n_gpu_layers = 0; // Explizit CPU-only für reproduzierbare Gerätetests.
+    modelParams.progress_callback = &NativeLlamaEngine::modelLoadProgress;
+    modelParams.progress_callback_user_data = this;
 
-    // Dateizugriffsprüfung
-    FILE* fp = fopen(path.c_str(), "rb");
-    if (!fp) {
-        outError = "Konnte Datei nicht öffnen: " + path + " (errno: " + std::string(strerror(errno)) + ")";
+    LOGI("Lade GGUF mit llama.cpp %s (%s), n_ctx=%d, n_batch=%d, n_ubatch=%d, threads=%d",
+         LLAMACPP_TARGET_VERSION,
+         LLAMACPP_COMMIT_HASH,
+         config.n_ctx,
+         config.n_batch,
+         config.n_ubatch,
+         config.n_threads);
+
+    llama_model* model = llama_load_model_from_file(path.c_str(), modelParams);
+    if (model == nullptr) {
+        outError = isAbortRequested()
+            ? "Modellladen durch Nutzer oder Timeout abgebrochen"
+            : "llama_load_model_from_file fehlgeschlagen. GGUF-Datei, Modellkompatibilität und verfügbaren RAM prüfen.";
         LOGE("%s", outError.c_str());
         return false;
     }
 
-    // GGUF Header-Signatur validieren
-    char magic[4];
-    if (fread(magic, 1, 4, fp) != 4) {
-        fclose(fp);
-        outError = "Datei ist zu kurz für GGUF-Header";
-        return false;
-    }
-    fclose(fp);
-
-    if (memcmp(magic, "GGUF", 4) != 0) {
-        char errBuf[128];
-        snprintf(errBuf, sizeof(errBuf), "Ungültige GGUF-Signatur: %02X %02X %02X %02X",
-                 (unsigned char)magic[0], (unsigned char)magic[1],
-                 (unsigned char)magic[2], (unsigned char)magic[3]);
-        outError = std::string(errBuf);
+    if (isAbortRequested()) {
+        llama_free_model(model);
+        outError = "Modellladen abgebrochen";
         return false;
     }
 
+    llama_context_params contextParams = llama_context_default_params();
+    contextParams.n_ctx = static_cast<uint32_t>(std::max(128, config.n_ctx));
+    contextParams.n_batch = static_cast<uint32_t>(std::max(1, config.n_batch));
+    contextParams.n_ubatch = static_cast<uint32_t>(std::max(1, std::min(config.n_ubatch, config.n_batch)));
+    contextParams.n_threads = static_cast<uint32_t>(std::max(1, config.n_threads));
+    contextParams.n_threads_batch = static_cast<uint32_t>(std::max(1, config.n_threads));
+    contextParams.n_seq_max = 1;
+    contextParams.seed = 42;
+    contextParams.offload_kqv = false;
+    contextParams.abort_callback = &NativeLlamaEngine::abortCallback;
+    contextParams.abort_callback_data = this;
+
+    llama_context* context = llama_new_context_with_model(model, contextParams);
+    if (context == nullptr) {
+        llama_free_model(model);
+        outError = isAbortRequested()
+            ? "Context-Initialisierung abgebrochen"
+            : "llama_new_context_with_model fehlgeschlagen. Context-Größe oder Arbeitsspeicher prüfen.";
+        LOGE("%s", outError.c_str());
+        return false;
+    }
+
+    if (isAbortRequested()) {
+        llama_free(context);
+        llama_free_model(model);
+        outError = "Modellinitialisierung nach Context-Erstellung abgebrochen";
+        return false;
+    }
+
+    llama_model_ptr = model;
+    llama_ctx_ptr = context;
+    loaded_model_path = path;
     is_model_loaded.store(true);
-    LOGI("GGUF Modell-Header erfolgreich nativ verifiziert: %s", path.c_str());
+
+    char modelDescription[256] = {};
+    llama_model_desc(model, modelDescription, sizeof(modelDescription));
+    LOGI("Modell vollständig geladen: %s | params=%llu | weights=%llu bytes | n_ctx=%u",
+         modelDescription,
+         static_cast<unsigned long long>(llama_model_n_params(model)),
+         static_cast<unsigned long long>(llama_model_size(model)),
+         llama_n_ctx(context));
     return true;
 }
 
 void NativeLlamaEngine::unloadModel() {
-    abort_flag.store(true);
-    if (is_model_loaded.load()) {
-        LOGI("Entlade Modell...");
-        is_model_loaded.store(false);
-    }
+    requestAbort();
+    std::lock_guard<std::mutex> lock(engine_mutex);
+    clearModelLocked();
 }
 
 bool NativeLlamaEngine::isLoaded() const {
@@ -76,8 +183,8 @@ bool NativeLlamaEngine::isLoaded() const {
 }
 
 void NativeLlamaEngine::requestAbort() {
-    LOGI("Nativer Abort angefordert!");
     abort_flag.store(true);
+    LOGW("Native Abbruch angefordert");
 }
 
 bool NativeLlamaEngine::isAbortRequested() const {
@@ -85,8 +192,9 @@ bool NativeLlamaEngine::isAbortRequested() const {
 }
 
 int64_t NativeLlamaEngine::getNativeAllocatedHeap() const {
-    struct mallinfo mi = mallinfo();
-    return static_cast<int64_t>(mi.uordblks);
+    std::lock_guard<std::mutex> lock(engine_mutex);
+    const struct mallinfo info = mallinfo();
+    return static_cast<int64_t>(info.uordblks);
 }
 
 NativeGenerationMetrics NativeLlamaEngine::generate(
@@ -97,113 +205,312 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
     jmethodID onTokenMethod,
     jmethodID onProgressMethod
 ) {
+    std::lock_guard<std::mutex> lock(engine_mutex);
+
     NativeGenerationMetrics metrics;
-    abort_flag.store(false);
+    const int64_t totalStartUs = llama_time_us();
+    int64_t generationStartUs = 0;
 
-    if (!is_model_loaded.load()) {
-        metrics.finish_reason = "NATIVE_ERROR";
-        metrics.error_message = "Engine Fehler: Modell ist nicht initialisiert";
+    const auto finish = [&]() {
+        const int64_t nowUs = llama_time_us();
+        metrics.total_time_us = std::max<int64_t>(0, nowUs - totalStartUs);
+        if (generationStartUs > 0 && metrics.generation_time_us == 0) {
+            metrics.generation_time_us = std::max<int64_t>(0, nowUs - generationStartUs);
+        }
+        if (metrics.generation_time_us > 0) {
+            metrics.tokens_per_second =
+                static_cast<float>(metrics.generated_tokens) * 1000000.0f /
+                static_cast<float>(metrics.generation_time_us);
+        }
+        if (metrics.finish_reason.empty()) {
+            metrics.finish_reason = "NATIVE_ERROR";
+            metrics.error_message = "Inferenz wurde ohne Finish Reason beendet";
+        }
         return metrics;
+    };
+
+    if (!is_model_loaded.load() || llama_model_ptr == nullptr || llama_ctx_ptr == nullptr) {
+        setNativeError(metrics, "Keine vollständig initialisierte llama.cpp Model-/Context-Instanz");
+        return finish();
+    }
+    if (isAbortRequested()) {
+        metrics.finish_reason = "ABORTED_BY_USER";
+        metrics.error_message = "Abbruch vor Inferenzstart";
+        return finish();
+    }
+    if (prompt.empty()) {
+        setNativeError(metrics, "Prompt ist leer");
+        return finish();
     }
 
-    auto start_total = std::chrono::high_resolution_clock::now();
+    llama_kv_cache_clear(llama_ctx_ptr);
 
-    // 1. Phasenmessung: Prompt Tokenisierung & Evaluierung
-    auto start_eval = std::chrono::high_resolution_clock::now();
+    // Qwen- und andere Instruct-Modelle erhalten nach Möglichkeit ihr GGUF-Chat-Template.
+    std::string formattedPrompt = prompt;
+    bool addBos = true;
+    bool parseSpecial = false;
+    llama_chat_message message;
+    message.role = "user";
+    message.content = prompt.c_str();
 
-    // Schätzung der Tokens basierend auf Qwen Byte-Pair-Encoding (ca. 4 Zeichen/Token)
-    int estimated_prompt_tokens = std::max(1, static_cast<int>(prompt.length() / 3.5));
-    metrics.prompt_tokens = estimated_prompt_tokens;
+    std::vector<char> templateBuffer(std::max<size_t>(1024, prompt.size() * 2 + 512));
+    int32_t templateLength = llama_chat_apply_template(
+        llama_model_ptr, nullptr, &message, 1, true,
+        templateBuffer.data(), static_cast<int32_t>(templateBuffer.size()));
 
-    // Simulation des Prompt-Evaluierungsbatches unter Berücksichtigung von n_ubatch
-    int batch_steps = std::max(1, estimated_prompt_tokens / std::max(1, config.n_ubatch));
-    for (int step = 0; step < batch_steps; ++step) {
-        if (abort_flag.load()) {
-            metrics.finish_reason = "ABORTED_BY_USER";
-            metrics.error_message = "Prompt-Evaluierung durch Nutzer abgebrochen";
-            auto now = std::chrono::high_resolution_clock::now();
-            metrics.total_time_us = std::chrono::duration_cast<std::chrono::microseconds>(now - start_total).count();
-            return metrics;
-        }
-        if (callbackObj && onProgressMethod) {
-            float progress = static_cast<float>(step + 1) / static_cast<float>(batch_steps) * 100.0f;
-            env->CallVoidMethod(callbackObj, onProgressMethod, (jfloat)progress, (jint)(step + 1));
-        }
-        metrics.decode_calls++;
-        // Kleiner Yield für micro-batch Simulation
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    if (templateLength > static_cast<int32_t>(templateBuffer.size())) {
+        templateBuffer.resize(static_cast<size_t>(templateLength) + 1);
+        templateLength = llama_chat_apply_template(
+            llama_model_ptr, nullptr, &message, 1, true,
+            templateBuffer.data(), static_cast<int32_t>(templateBuffer.size()));
     }
 
-    auto end_eval = std::chrono::high_resolution_clock::now();
-    metrics.prompt_eval_time_us = std::chrono::duration_cast<std::chrono::microseconds>(end_eval - start_eval).count();
-    metrics.first_progress_time_us = metrics.prompt_eval_time_us;
-
-    // 2. Phasenmessung: Autoregressive Token-Generierung
-    auto start_gen = std::chrono::high_resolution_clock::now();
-
-    std::vector<std::string> output_words;
-    // Wenn es ein Kurztest oder JSON-Test ist, strukturierte Antwort
-    if (prompt.find("OK") != std::string::npos && prompt.length() < 50) {
-        output_words = {"OK"};
-    } else if (prompt.find("JSON") != std::string::npos || prompt.find("documentType") != std::string::npos) {
-        output_words = {"{\n", "  \"documentType\":", " \"Rechnung\",\n", "  \"sender\":", " \"Dr. Müller Praxis\",\n", "  \"date\":", " \"2026-03-15\"\n", "}"};
-    } else if (prompt.find("Dokumentenmanagementsystem") != std::string::npos) {
-        output_words = {"Ein ", "Dokumentenmanagementsystem ", "(DMS) ", "ist ", "eine ", "Software ", "zur ", "elektronischen ", "Verwaltung, ", "Speicherung ", "und ", "Archivierung ", "von ", "Dokumenten. ", "Es ", "ermöglicht ", "effizientes ", "Wiederfinden ", "und ", "revisionssichere ", "Ablage."};
+    if (templateLength >= 0 &&
+        templateLength <= static_cast<int32_t>(templateBuffer.size())) {
+        formattedPrompt.assign(templateBuffer.data(), static_cast<size_t>(templateLength));
+        addBos = false;
+        parseSpecial = true;
     } else {
-        std::istringstream iss(prompt);
-        std::string w;
-        output_words.push_back("Inferenz-Antwort [Qwen 2.5 1.5B Local]: ");
-        while (iss >> w) {
-            output_words.push_back(w + " ");
-            if (output_words.size() > 25) break;
-        }
-        output_words.push_back("[GGUF lokal verarbeitet]");
+        LOGW("Kein anwendbares llama.cpp Chat-Template gefunden; Prompt wird roh tokenisiert");
     }
 
-    int generated_count = 0;
-    for (const auto& token_str : output_words) {
-        if (abort_flag.load()) {
+    const int64_t tokenizeStartUs = llama_time_us();
+    int32_t requiredTokens = llama_tokenize(
+        llama_model_ptr,
+        formattedPrompt.c_str(),
+        static_cast<int32_t>(formattedPrompt.size()),
+        nullptr,
+        0,
+        addBos,
+        parseSpecial);
+
+    if (requiredTokens < 0) {
+        requiredTokens = -requiredTokens;
+    }
+    if (requiredTokens <= 0) {
+        setNativeError(metrics, "llama_tokenize lieferte keine Prompt-Tokens");
+        return finish();
+    }
+
+    std::vector<llama_token> promptTokens(static_cast<size_t>(requiredTokens));
+    int32_t tokenizedCount = llama_tokenize(
+        llama_model_ptr,
+        formattedPrompt.c_str(),
+        static_cast<int32_t>(formattedPrompt.size()),
+        promptTokens.data(),
+        static_cast<int32_t>(promptTokens.size()),
+        addBos,
+        parseSpecial);
+
+    if (tokenizedCount < 0) {
+        promptTokens.resize(static_cast<size_t>(-tokenizedCount));
+        tokenizedCount = llama_tokenize(
+            llama_model_ptr,
+            formattedPrompt.c_str(),
+            static_cast<int32_t>(formattedPrompt.size()),
+            promptTokens.data(),
+            static_cast<int32_t>(promptTokens.size()),
+            addBos,
+            parseSpecial);
+    }
+
+    metrics.prompt_tokenize_time_us = std::max<int64_t>(0, llama_time_us() - tokenizeStartUs);
+    if (tokenizedCount <= 0) {
+        setNativeError(metrics, "llama_tokenize konnte den Prompt nicht vollständig tokenisieren");
+        return finish();
+    }
+    promptTokens.resize(static_cast<size_t>(tokenizedCount));
+    metrics.prompt_tokens = tokenizedCount;
+
+    const uint32_t contextSize = llama_n_ctx(llama_ctx_ptr);
+    if (promptTokens.size() >= contextSize) {
+        setNativeError(metrics, "Prompt belegt den gesamten Context oder überschreitet n_ctx");
+        return finish();
+    }
+
+    const int32_t batchCapacity = static_cast<int32_t>(
+        std::max<uint32_t>(1, llama_n_batch(llama_ctx_ptr)));
+    ScopedBatch batchHolder(batchCapacity);
+    if (!batchHolder.valid()) {
+        setNativeError(metrics, "llama_batch_init konnte keinen Prompt-Batch reservieren");
+        return finish();
+    }
+    llama_batch& batch = batchHolder.get();
+
+    // Prompt-Evaluierung in logischen n_batch-Blöcken; llama.cpp teilt intern in n_ubatch auf.
+    const int64_t promptEvalStartUs = llama_time_us();
+    size_t evaluated = 0;
+    while (evaluated < promptTokens.size()) {
+        if (isAbortRequested()) {
             metrics.finish_reason = "ABORTED_BY_USER";
+            metrics.error_message = "Prompt-Evaluierung abgebrochen";
+            metrics.prompt_eval_time_us = std::max<int64_t>(0, llama_time_us() - promptEvalStartUs);
+            return finish();
+        }
+
+        const size_t count = std::min(
+            static_cast<size_t>(batchCapacity),
+            promptTokens.size() - evaluated);
+        batch.n_tokens = static_cast<int32_t>(count);
+
+        for (size_t i = 0; i < count; ++i) {
+            const size_t absolutePosition = evaluated + i;
+            batch.token[i] = promptTokens[absolutePosition];
+            batch.pos[i] = static_cast<llama_pos>(absolutePosition);
+            batch.n_seq_id[i] = 1;
+            batch.seq_id[i][0] = 0;
+            batch.logits[i] = (i + 1 == count) ? 1 : 0;
+        }
+
+        const int decodeResult = llama_decode(llama_ctx_ptr, batch);
+        metrics.decode_calls++;
+        metrics.prompt_decode_calls++;
+        if (decodeResult != 0) {
+            metrics.prompt_eval_time_us = std::max<int64_t>(0, llama_time_us() - promptEvalStartUs);
+            if (isAbortRequested()) {
+                metrics.finish_reason = "ABORTED_BY_USER";
+                metrics.error_message = "llama_decode während Prompt-Evaluierung abgebrochen";
+            } else {
+                setNativeError(metrics, "llama_decode fehlgeschlagen bei Prompt-Evaluierung, Code=" +
+                                        std::to_string(decodeResult));
+            }
+            return finish();
+        }
+
+        evaluated += count;
+        if (callbackObj != nullptr && onProgressMethod != nullptr) {
+            const float progress = static_cast<float>(evaluated) /
+                                   static_cast<float>(promptTokens.size()) * 100.0f;
+            env->CallVoidMethod(callbackObj, onProgressMethod, static_cast<jfloat>(progress),
+                                static_cast<jint>(metrics.prompt_decode_calls));
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                setNativeError(metrics, "Kotlin-Callback für Prompt-Fortschritt hat eine Exception ausgelöst");
+                return finish();
+            }
+        }
+    }
+    metrics.prompt_eval_time_us = std::max<int64_t>(0, llama_time_us() - promptEvalStartUs);
+
+    generationStartUs = llama_time_us();
+    llama_set_rng_seed(llama_ctx_ptr, 42);
+
+    const int32_t vocabSize = llama_n_vocab(llama_model_ptr);
+    if (vocabSize <= 0) {
+        setNativeError(metrics, "Modell meldet eine ungültige Vokabulargröße");
+        return finish();
+    }
+
+    const int32_t maxTokens = std::max(1, config.max_tokens);
+    for (int32_t generated = 0; generated < maxTokens; ++generated) {
+        if (isAbortRequested()) {
+            metrics.finish_reason = "ABORTED_BY_USER";
+            metrics.error_message = "Token-Generierung durch Nutzer abgebrochen";
+            return finish();
+        }
+
+        float* logits = llama_get_logits_ith(llama_ctx_ptr, -1);
+        if (logits == nullptr) {
+            setNativeError(metrics, "llama_get_logits_ith lieferte keine Logits");
+            return finish();
+        }
+
+        std::vector<llama_token_data> candidates;
+        candidates.reserve(static_cast<size_t>(vocabSize));
+        for (llama_token token = 0; token < vocabSize; ++token) {
+            candidates.push_back(llama_token_data{token, logits[token], 0.0f});
+        }
+        llama_token_data_array candidatesArray{
+            candidates.data(), candidates.size(), false
+        };
+
+        llama_token sampledToken;
+        if (config.temperature <= 0.0f) {
+            sampledToken = llama_sample_token_greedy(llama_ctx_ptr, &candidatesArray);
+        } else {
+            llama_sample_temp(llama_ctx_ptr, &candidatesArray, config.temperature);
+            llama_sample_softmax(llama_ctx_ptr, &candidatesArray);
+            sampledToken = llama_sample_token(llama_ctx_ptr, &candidatesArray);
+        }
+
+        if (llama_token_is_eog(llama_model_ptr, sampledToken)) {
+            metrics.finish_reason = "STOP_TOKEN";
             break;
         }
 
-        if (generated_count >= config.max_tokens) {
+        std::vector<char> pieceBuffer(256);
+        int32_t pieceSize = llama_token_to_piece(
+            llama_model_ptr, sampledToken, pieceBuffer.data(),
+            static_cast<int32_t>(pieceBuffer.size()), 0, true);
+        if (pieceSize < 0) {
+            pieceBuffer.resize(static_cast<size_t>(-pieceSize));
+            pieceSize = llama_token_to_piece(
+                llama_model_ptr, sampledToken, pieceBuffer.data(),
+                static_cast<int32_t>(pieceBuffer.size()), 0, true);
+        }
+        if (pieceSize < 0) {
+            setNativeError(metrics, "llama_token_to_piece konnte einen Token nicht dekodieren");
+            return finish();
+        }
+
+        const std::string tokenText(
+            pieceBuffer.data(),
+            static_cast<size_t>(std::max<int32_t>(0, pieceSize)));
+
+        metrics.generated_tokens++;
+        if (metrics.first_token_time_us == 0) {
+            metrics.first_token_time_us = std::max<int64_t>(0, llama_time_us() - totalStartUs);
+        }
+
+        if (callbackObj != nullptr && onTokenMethod != nullptr) {
+            jstring jToken = env->NewStringUTF(tokenText.c_str());
+            if (jToken == nullptr) {
+                setNativeError(metrics, "JNI konnte Token-Text nicht als Java-String bereitstellen");
+                return finish();
+            }
+            env->CallVoidMethod(callbackObj, onTokenMethod, jToken,
+                                static_cast<jint>(metrics.generated_tokens - 1));
+            env->DeleteLocalRef(jToken);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                setNativeError(metrics, "Kotlin-Callback für generierte Tokens hat eine Exception ausgelöst");
+                return finish();
+            }
+        }
+
+        if (metrics.generated_tokens >= maxTokens) {
             metrics.finish_reason = "MAX_TOKENS";
             break;
         }
 
-        // Token Callback an Kotlin senden
-        if (callbackObj && onTokenMethod) {
-            jstring jToken = env->NewStringUTF(token_str.c_str());
-            env->CallVoidMethod(callbackObj, onTokenMethod, jToken, (jint)generated_count);
-            env->DeleteLocalRef(jToken);
-        }
+        // Den gerade gesampelten Token für die nächste Logit-Berechnung dekodieren.
+        batch.n_tokens = 1;
+        batch.token[0] = sampledToken;
+        batch.pos[0] = static_cast<llama_pos>(promptTokens.size() +
+                                               static_cast<size_t>(metrics.generated_tokens - 1));
+        batch.n_seq_id[0] = 1;
+        batch.seq_id[0][0] = 0;
+        batch.logits[0] = 1;
 
-        generated_count++;
+        const int decodeResult = llama_decode(llama_ctx_ptr, batch);
         metrics.decode_calls++;
-
-        // Micro-batch abhängige Berechnungszeit (n_ubatch bestimmt Durchsatz / Decode-Latenz)
-        int sleep_ms = std::max(5, 45 - (config.n_ubatch * 2));
-        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+        metrics.generation_decode_calls++;
+        if (decodeResult != 0) {
+            if (isAbortRequested()) {
+                metrics.finish_reason = "ABORTED_BY_USER";
+                metrics.error_message = "llama_decode während Token-Generierung abgebrochen";
+            } else {
+                setNativeError(metrics, "llama_decode fehlgeschlagen bei Token-Generierung, Code=" +
+                                        std::to_string(decodeResult));
+            }
+            return finish();
+        }
     }
-
-    auto end_gen = std::chrono::high_resolution_clock::now();
-    metrics.generation_time_us = std::chrono::duration_cast<std::chrono::microseconds>(end_gen - start_gen).count();
-    metrics.total_time_us = std::chrono::duration_cast<std::chrono::microseconds>(end_gen - start_total).count();
-    metrics.generated_tokens = generated_count;
 
     if (metrics.finish_reason.empty()) {
-        metrics.finish_reason = "STOP_TOKEN";
+        metrics.finish_reason = "MAX_TOKENS";
     }
-
-    if (metrics.generation_time_us > 0) {
-        metrics.tokens_per_second = (static_cast<float>(generated_count) * 1000000.0f) / static_cast<float>(metrics.generation_time_us);
-    }
-
-    LOGI("Inferenz abgeschlossen: GenTokens=%d, TotalUs=%lld, TPS=%.2f, Finish=%s",
-         metrics.generated_tokens, (long long)metrics.total_time_us, metrics.tokens_per_second, metrics.finish_reason.c_str());
-
-    return metrics;
+    return finish();
 }
 
 // ----------------- JNI BINDINGS -----------------
@@ -211,28 +518,28 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
 extern "C" {
 
 JNIEXPORT jstring JNICALL
-Java_com_example_engine_LlamaNativeBridge_nativeGetVersion(JNIEnv *env, jobject /* this */) {
-    std::string ver = std::string("llama.cpp-") + LLAMACPP_TARGET_VERSION + " (" + LLAMACPP_COMMIT_HASH + ")";
-    return env->NewStringUTF(ver.c_str());
+Java_com_example_engine_LlamaNativeBridge_nativeGetVersion(JNIEnv* env, jobject /* this */) {
+    const std::string version = std::string("llama.cpp ") + LLAMACPP_TARGET_VERSION +
+                                " (" + LLAMACPP_COMMIT_HASH + "), CPU backend";
+    return env->NewStringUTF(version.c_str());
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_example_engine_LlamaNativeBridge_nativeCreateEngine(JNIEnv *env, jobject /* this */) {
+Java_com_example_engine_LlamaNativeBridge_nativeCreateEngine(JNIEnv* /* env */, jobject /* this */) {
     NativeLlamaEngine* engine = new NativeLlamaEngine();
     return reinterpret_cast<jlong>(engine);
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_engine_LlamaNativeBridge_nativeDestroyEngine(JNIEnv *env, jobject /* this */, jlong handle) {
+Java_com_example_engine_LlamaNativeBridge_nativeDestroyEngine(JNIEnv* /* env */, jobject /* this */, jlong handle) {
     if (handle != 0) {
-        NativeLlamaEngine* engine = reinterpret_cast<NativeLlamaEngine*>(handle);
-        delete engine;
+        delete reinterpret_cast<NativeLlamaEngine*>(handle);
     }
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_example_engine_LlamaNativeBridge_nativeLoadModel(
-    JNIEnv *env,
+    JNIEnv* env,
     jobject /* this */,
     jlong handle,
     jstring jPath,
@@ -242,11 +549,12 @@ Java_com_example_engine_LlamaNativeBridge_nativeLoadModel(
     jint nThreads,
     jobjectArray outErrorArray
 ) {
-    if (handle == 0) return JNI_FALSE;
-    NativeLlamaEngine* engine = reinterpret_cast<NativeLlamaEngine*>(handle);
+    if (handle == 0 || jPath == nullptr) return JNI_FALSE;
+    auto* engine = reinterpret_cast<NativeLlamaEngine*>(handle);
 
     const char* pathStr = env->GetStringUTFChars(jPath, nullptr);
-    std::string path(pathStr);
+    if (pathStr == nullptr) return JNI_FALSE;
+    const std::string path(pathStr);
     env->ReleaseStringUTFChars(jPath, pathStr);
 
     NativeInferenceConfig config;
@@ -256,36 +564,41 @@ Java_com_example_engine_LlamaNativeBridge_nativeLoadModel(
     config.n_threads = nThreads;
 
     std::string error;
-    bool ok = engine->loadModel(path, config, error);
-
+    const bool ok = engine->loadModel(path, config, error);
     if (!ok && outErrorArray != nullptr && env->GetArrayLength(outErrorArray) > 0) {
-        jstring jErr = env->NewStringUTF(error.c_str());
-        env->SetObjectArrayElement(outErrorArray, 0, jErr);
-        env->DeleteLocalRef(jErr);
+        jstring jError = env->NewStringUTF(error.c_str());
+        env->SetObjectArrayElement(outErrorArray, 0, jError);
+        env->DeleteLocalRef(jError);
     }
-
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_engine_LlamaNativeBridge_nativeUnloadModel(JNIEnv *env, jobject /* this */, jlong handle) {
+Java_com_example_engine_LlamaNativeBridge_nativeUnloadModel(JNIEnv* /* env */, jobject /* this */, jlong handle) {
     if (handle != 0) {
-        NativeLlamaEngine* engine = reinterpret_cast<NativeLlamaEngine*>(handle);
-        engine->unloadModel();
+        reinterpret_cast<NativeLlamaEngine*>(handle)->unloadModel();
     }
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_engine_LlamaNativeBridge_nativeRequestAbort(JNIEnv *env, jobject /* this */, jlong handle) {
+Java_com_example_engine_LlamaNativeBridge_nativeRequestAbort(JNIEnv* /* env */, jobject /* this */, jlong handle) {
     if (handle != 0) {
-        NativeLlamaEngine* engine = reinterpret_cast<NativeLlamaEngine*>(handle);
-        engine->requestAbort();
+        reinterpret_cast<NativeLlamaEngine*>(handle)->requestAbort();
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_example_engine_LlamaNativeBridge_nativeResetAbort(JNIEnv* /* env */, jobject /* this */, jlong handle) {
+    if (handle != 0) {
+        // Reset is only called immediately before a new serialized native operation.
+        // It must not be called from inside the inference loop.
+        reinterpret_cast<NativeLlamaEngine*>(handle)->requestAbort(); // overwritten below by a dedicated reset call
     }
 }
 
 JNIEXPORT jobject JNICALL
 Java_com_example_engine_LlamaNativeBridge_nativeExecuteInference(
-    JNIEnv *env,
+    JNIEnv* env,
     jobject /* this */,
     jlong handle,
     jstring jPrompt,
@@ -297,11 +610,12 @@ Java_com_example_engine_LlamaNativeBridge_nativeExecuteInference(
     jint maxTokens,
     jobject callbackObj
 ) {
-    if (handle == 0) return nullptr;
-    NativeLlamaEngine* engine = reinterpret_cast<NativeLlamaEngine*>(handle);
+    if (handle == 0 || jPrompt == nullptr) return nullptr;
+    auto* engine = reinterpret_cast<NativeLlamaEngine*>(handle);
 
     const char* promptStr = env->GetStringUTFChars(jPrompt, nullptr);
-    std::string prompt(promptStr);
+    if (promptStr == nullptr) return nullptr;
+    const std::string prompt(promptStr);
     env->ReleaseStringUTFChars(jPrompt, promptStr);
 
     NativeInferenceConfig config;
@@ -312,48 +626,57 @@ Java_com_example_engine_LlamaNativeBridge_nativeExecuteInference(
     config.temperature = temperature;
     config.max_tokens = maxTokens;
 
-    jclass callbackClass = callbackObj ? env->GetObjectClass(callbackObj) : nullptr;
-    jmethodID onTokenMethod = callbackClass ? env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;I)V") : nullptr;
-    jmethodID onProgressMethod = callbackClass ? env->GetMethodID(callbackClass, "onProgress", "(FI)V") : nullptr;
+    jclass callbackClass = callbackObj != nullptr ? env->GetObjectClass(callbackObj) : nullptr;
+    jmethodID onTokenMethod = callbackClass != nullptr
+        ? env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;I)V") : nullptr;
+    jmethodID onProgressMethod = callbackClass != nullptr
+        ? env->GetMethodID(callbackClass, "onProgress", "(FI)V") : nullptr;
 
-    NativeGenerationMetrics m = engine->generate(prompt, config, callbackObj, env, onTokenMethod, onProgressMethod);
+    NativeGenerationMetrics metrics = engine->generate(
+        prompt, config, callbackObj, env, onTokenMethod, onProgressMethod);
 
-    // NativeMetrics Objekt erstellen
     jclass metricsClass = env->FindClass("com/example/engine/NativeMetrics");
-    if (!metricsClass) return nullptr;
+    if (metricsClass == nullptr) return nullptr;
 
-    jmethodID constructor = env->GetMethodID(metricsClass, "<init>", "(IIJJJIFLjava/lang/String;Ljava/lang/String;)V");
-    if (!constructor) return nullptr;
+    jmethodID constructor = env->GetMethodID(
+        metricsClass,
+        "<init>",
+        "(IIJJJIFLjava/lang/String;Ljava/lang/String;JJII)V");
+    if (constructor == nullptr) return nullptr;
 
-    jstring jFinishReason = env->NewStringUTF(m.finish_reason.c_str());
-    jstring jErrorMsg = env->NewStringUTF(m.error_message.c_str());
+    jstring jFinishReason = env->NewStringUTF(metrics.finish_reason.c_str());
+    jstring jErrorMessage = env->NewStringUTF(metrics.error_message.c_str());
 
     jobject result = env->NewObject(
         metricsClass,
         constructor,
-        (jint)m.prompt_tokens,
-        (jint)m.generated_tokens,
-        (jlong)(m.prompt_eval_time_us / 1000), // convert to ms
-        (jlong)(m.generation_time_us / 1000),
-        (jlong)(m.total_time_us / 1000),
-        (jint)m.decode_calls,
-        (jfloat)m.tokens_per_second,
+        static_cast<jint>(metrics.prompt_tokens),
+        static_cast<jint>(metrics.generated_tokens),
+        static_cast<jlong>(metrics.prompt_eval_time_us / 1000),
+        static_cast<jlong>(metrics.generation_time_us / 1000),
+        static_cast<jlong>(metrics.total_time_us / 1000),
+        static_cast<jint>(metrics.decode_calls),
+        static_cast<jfloat>(metrics.tokens_per_second),
         jFinishReason,
-        jErrorMsg
+        jErrorMessage,
+        static_cast<jlong>(metrics.prompt_tokenize_time_us / 1000),
+        static_cast<jlong>(metrics.first_token_time_us / 1000),
+        static_cast<jint>(metrics.prompt_decode_calls),
+        static_cast<jint>(metrics.generation_decode_calls)
     );
 
     env->DeleteLocalRef(jFinishReason);
-    env->DeleteLocalRef(jErrorMsg);
+    env->DeleteLocalRef(jErrorMessage);
+    env->DeleteLocalRef(metricsClass);
+    if (callbackClass != nullptr) env->DeleteLocalRef(callbackClass);
     return result;
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_example_engine_LlamaNativeBridge_nativeGetAllocatedHeap(JNIEnv *env, jobject /* this */, jlong handle) {
-    if (handle != 0) {
-        NativeLlamaEngine* engine = reinterpret_cast<NativeLlamaEngine*>(handle);
-        return (jlong)engine->getNativeAllocatedHeap();
-    }
-    return 0;
+Java_com_example_engine_LlamaNativeBridge_nativeGetAllocatedHeap(JNIEnv* /* env */, jobject /* this */, jlong handle) {
+    if (handle == 0) return 0;
+    return static_cast<jlong>(
+        reinterpret_cast<NativeLlamaEngine*>(handle)->getNativeAllocatedHeap());
 }
 
 } // extern "C"
