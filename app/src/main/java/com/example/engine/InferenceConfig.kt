@@ -1,19 +1,19 @@
 package com.example.engine
 
 enum class ProfilePreset(val label: String, val description: String) {
-    BALANCED("Ausgewogen", "n_ubatch = 8, 4 Threads (Empfohlen für Qwen 1.5B)"),
+    BALANCED("Ausgewogen", "n_ubatch = 32, 4 Threads (Qwen 1.5B)"),
     POWER_SAVER("Energiesparend", "n_ubatch = 4, 2 Threads (Minimaler Akkuverbrauch)"),
-    MAX_THROUGHPUT("Maximaler Durchsatz", "n_ubatch = 16, maximale CPU-Kerne")
+    MAX_THROUGHPUT("Maximaler Durchsatz", "n_ubatch = 32, maximale CPU-Kerne")
 }
 
 data class InferenceConfig(
     val selectedProfile: ProfilePreset = ProfilePreset.BALANCED,
     val nCtx: Int = 2048,
     val nBatch: Int = 512,
-    val nUbatch: Int = 8,
+    val nUbatch: Int = 32,
     val nThreads: Int = 4,
-    val temperature: Float = 0.25f,
-    val maxTokens: Int = 512,
+    val temperature: Float = 0.7f,
+    val maxTokens: Int = 160,
     // Konfigurierbare Timeouts gemäß Spezifikation
     val timeoutInitSec: Int = 120,
     val timeoutShortTestSec: Int = 30,
@@ -33,7 +33,7 @@ data class InferenceConfig(
                     selectedProfile = preset,
                     nCtx = 2048,
                     nBatch = 512,
-                    nUbatch = 8,
+                    nUbatch = 32,
                     nThreads = 4.coerceAtMost(availableCores)
                 )
                 ProfilePreset.POWER_SAVER -> InferenceConfig(
@@ -47,7 +47,7 @@ data class InferenceConfig(
                     selectedProfile = preset,
                     nCtx = 2048,
                     nBatch = 512,
-                    nUbatch = 16,
+                    nUbatch = 32,
                     nThreads = availableCores
                 )
             }

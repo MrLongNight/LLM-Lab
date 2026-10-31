@@ -430,7 +430,7 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
     recentTokens.insert(recentTokens.end(), promptTokens.end() - static_cast<std::ptrdiff_t>(initialRecent), promptTokens.end());
     std::vector<char> pieceBuffer(256);
 
-    LOGI("Sampler: temperature=%.2f top_k=40 top_p=0.90 repeat_penalty=1.08", config.temperature);
+    LOGI("Sampler: temperature=%.2f top_k=20 top_p=0.80 repeat_penalty=1.05", config.temperature);
     for (int32_t generated = 0; generated < maxTokens; ++generated) {
         if (isAbortRequested()) {
             metrics.finish_reason = "ABORTED_BY_USER";
@@ -453,14 +453,14 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
         llama_token_data_array candidatesArray{candidates.data(), candidates.size(), false};
         llama_sample_repetition_penalties(
             llama_ctx_ptr, &candidatesArray, recentTokens.data(), recentTokens.size(),
-            1.08f, 0.0f, 0.0f);
+            1.05f, 0.0f, 0.0f);
 
         llama_token sampledToken;
         if (config.temperature <= 0.0f) {
             sampledToken = llama_sample_token_greedy(llama_ctx_ptr, &candidatesArray);
         } else {
-            llama_sample_top_k(llama_ctx_ptr, &candidatesArray, 40, 1);
-            llama_sample_top_p(llama_ctx_ptr, &candidatesArray, 0.90f, 1);
+            llama_sample_top_k(llama_ctx_ptr, &candidatesArray, 20, 1);
+            llama_sample_top_p(llama_ctx_ptr, &candidatesArray, 0.80f, 1);
             llama_sample_temp(llama_ctx_ptr, &candidatesArray, config.temperature);
             llama_sample_softmax(llama_ctx_ptr, &candidatesArray);
             sampledToken = llama_sample_token(llama_ctx_ptr, &candidatesArray);
