@@ -95,8 +95,44 @@ jobs:
           grep -Eq 'lib/arm64-v8a/libllmlab_native[.]so$' "$RUNNER_TEMP/llmlab-apk-files.txt"
           grep -Eq 'lib/arm64-v8a/libggml-cpu[^/]*[.]so$' "$RUNNER_TEMP/llmlab-apk-files.txt"
           grep -Eq 'lib/arm64-v8a/libggml-vulkan[^/]*[.]so$' "$RUNNER_TEMP/llmlab-apk-files.txt"
-          grep -Eq 'lib/x86_64/libllmlab_native[.]so$' "$RUNNER_TEMP/llmlab-apk-files.txt"
-          echo "Runtime CPU variants and Vulkan backend are packaged."
+          grep -Eq 'lib/x86_64/libllmlab_native[.]so
+
+      - name: Prepare Standalone APK Artifact
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/LLM-Lab-Standalone-debug.apk
+
+      - name: Upload Standalone Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LLM-Lab-Standalone-Debug-APK
+          path: dist/LLM-Lab-Standalone-debug.apk
+          retention-days: 30
+          if-no-files-found: error
+ "$RUNNER_TEMP/llmlab-apk-files.txt"
+          python3 - "$APK" <<'PY'
+          import sys
+          import zipfile
+
+          apk = sys.argv[1]
+          with zipfile.ZipFile(apk) as archive:
+              entries = {item.filename: item for item in archive.infolist()}
+              required_groups = {
+                  "llmlab JNI": [name for name in entries if name == "lib/arm64-v8a/libllmlab_native.so"],
+                  "CPU backend": [name for name in entries if name.startswith("lib/arm64-v8a/libggml-cpu") and name.endswith(".so")],
+                  "Vulkan backend": [name for name in entries if name == "lib/arm64-v8a/libggml-vulkan.so"],
+              }
+              for label, names in required_groups.items():
+                  if not names:
+                      raise SystemExit(f"Missing {label} library in APK")
+                  for name in names:
+                      if entries[name].compress_type != zipfile.ZIP_DEFLATED:
+                          raise SystemExit(
+                              f"{label} library is not compressed for Android extraction: {name}"
+                          )
+          print("Native JNI/CPU/Vulkan libraries are compressed for extraction into nativeLibraryDir.")
+          PY
+          echo "Runtime CPU variants and Vulkan backend are packaged and extractable."
 
       - name: Prepare Standalone APK Artifact
         run: |
