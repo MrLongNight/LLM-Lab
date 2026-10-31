@@ -699,8 +699,10 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
 
         evaluated += count;
         if (callbackObj != nullptr && onProgressMethod != nullptr) {
+            // Vulkan can enqueue asynchronous work. Report at most 99% until
+            // the queue has completed and the prefill wall time is finalized.
             const float progress = static_cast<float>(evaluated) /
-                                   static_cast<float>(promptTokens.size()) * 100.0f;
+                                   static_cast<float>(promptTokens.size()) * 99.0f;
             env->CallVoidMethod(callbackObj, onProgressMethod, static_cast<jfloat>(progress),
                                 static_cast<jint>(metrics.prompt_decode_calls));
             if (env->ExceptionCheck()) {
@@ -710,9 +712,20 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
             }
         }
     }
+    // Synchronize before closing the prefill timer. Without this, async
+    // Vulkan queue wait may be misreported as "post-prefill to first token".
+    llama_synchronize(llama_ctx_ptr);
     metrics.prompt_eval_time_us = std::max<int64_t>(0, llama_time_us() - promptEvalStartUs);
 
-    generationStartUs = llama_time_us();
+    if (callbackObj != nullptr && onProgressMethod != nullptr) {
+        env->CallVoidMethod(callbackObj, onProgressMethod, static_cast<jfloat>(100.0f),
+                            static_cast<jint>(metrics.prompt_decode_calls));
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            setNativeError(metrics, "Kotlin-Callback für abgeschlossenen Prompt-Fortschritt hat eine Exception ausgelöst");
+            return finish();
+        }
+    }
 
     if (llama_vocab_n_tokens(vocab) <= 0) {
         setNativeError(metrics, "Modell meldet eine ungültige Vokabulargröße");
@@ -733,6 +746,8 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
         llama_sampler_chain_add(sampler.get(),llama_sampler_init_dist(42));
     }
     LOGI("Sampler chain: temp=%.2f top_k=%d top_p=%.2f seed=42",config.temperature,config.top_k,config.top_p);
+    // Exclude sampler construction from token decode throughput.
+    generationStartUs = llama_time_us();
     for (int32_t generated = 0; generated < maxTokens; ++generated) {
         if (isAbortRequested()) {
             metrics.finish_reason = "ABORTED_BY_USER";

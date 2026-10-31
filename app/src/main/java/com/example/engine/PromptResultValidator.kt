@@ -32,6 +32,20 @@ object PromptResultValidator {
                     "Erwartet: genau zwei Sätze mit Dokument und System; erkannt: $count."
                 )
             }
+            "TEST_TUNING", "TEST_SAMPLING" -> {
+                val relevant = output.contains("ocr", ignoreCase = true) ||
+                    output.contains("text", ignoreCase = true) ||
+                    output.contains("such", ignoreCase = true) ||
+                    output.contains("erkennung", ignoreCase = true)
+                PromptValidationResult(
+                    output.length >= 12 && relevant,
+                    if (output.length >= 12 && relevant) {
+                        "Thematisch passende Antwort vorhanden; Geschwindigkeit und Sampling werden separat bewertet."
+                    } else {
+                        "Erwartet wurde eine kurze thematisch passende OCR-/Text-Erklärung."
+                    }
+                )
+            }
             "TEST_EXTRACTION" -> {
                 val json = parseJson(output)
                 if (json == null) {

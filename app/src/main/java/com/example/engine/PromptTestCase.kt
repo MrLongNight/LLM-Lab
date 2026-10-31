@@ -18,7 +18,10 @@ data class InferenceTestVariant(
     val nUbatch: Int,
     val nThreads: Int,
     val nThreadsBatch: Int,
-    val backendPreference: BackendPreference
+    val backendPreference: BackendPreference,
+    val temperature: Float = 0.05f,
+    val topK: Int = 20,
+    val topP: Float = 0.8f
 ) {
     fun toConfig(base: InferenceConfig, maxTokens: Int): InferenceConfig {
         val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
@@ -30,9 +33,9 @@ data class InferenceTestVariant(
             nThreads = nThreads.coerceAtMost(cores),
             nThreadsBatch = nThreadsBatch.coerceAtMost(cores),
             backendPreference = backendPreference,
-            temperature = 0.05f,
-            topK = 20,
-            topP = 0.8f,
+            temperature = temperature,
+            topK = topK,
+            topP = topP,
             maxTokens = maxTokens
         )
     }
@@ -81,6 +84,33 @@ object PromptTestCatalog {
         )
     )
 
+    /**
+     * Short hardware sweep. Each configuration keeps sampling fixed.
+     * The target phone has eight logical CPU cores.
+     */
+    val TUNING_VARIANTS: List<InferenceTestVariant> = listOf(
+        InferenceTestVariant("CPU_GEN_2_8", "CPU 2/8 Threads · ubatch 64", 512, 64, 2, 8, BackendPreference.CPU_ONLY),
+        InferenceTestVariant("CPU_GEN_4_8", "CPU 4/8 Threads · ubatch 64", 512, 64, 4, 8, BackendPreference.CPU_ONLY),
+        InferenceTestVariant("CPU_GEN_6_8", "CPU 6/8 Threads · ubatch 64", 512, 64, 6, 8, BackendPreference.CPU_ONLY),
+        InferenceTestVariant("CPU_GEN_8_8", "CPU 8/8 Threads · ubatch 64", 512, 64, 8, 8, BackendPreference.CPU_ONLY),
+        InferenceTestVariant("CPU_GEN_8_8_UB128", "CPU 8/8 Threads · ubatch 128", 512, 128, 8, 8, BackendPreference.CPU_ONLY),
+        InferenceTestVariant("VULKAN_GEN_4_8", "Vulkan 4/8 Threads · ubatch 64", 512, 64, 4, 8, BackendPreference.ACCELERATOR_REQUIRED),
+        InferenceTestVariant("VULKAN_GEN_8_8", "Vulkan 8/8 Threads · ubatch 64", 512, 64, 8, 8, BackendPreference.ACCELERATOR_REQUIRED),
+        InferenceTestVariant("VULKAN_GEN_8_8_UB128", "Vulkan 8/8 Threads · ubatch 128", 512, 128, 8, 8, BackendPreference.ACCELERATOR_REQUIRED)
+    )
+
+    /**
+     * Sampling sweep: one parameter changes from the baseline per variant.
+     * Same Vulkan/threads/context/prompt keep hardware effects out of this test.
+     */
+    val SAMPLING_VARIANTS: List<InferenceTestVariant> = listOf(
+        InferenceTestVariant("SAMPLE_BASELINE", "Baseline · temp 0.05 · topK 20 · topP 0.80", 512, 64, 8, 8, BackendPreference.ACCELERATOR_REQUIRED),
+        InferenceTestVariant("SAMPLE_GREEDY", "Greedy · temp 0.00", 512, 64, 8, 8, BackendPreference.ACCELERATOR_REQUIRED, 0.0f, 20, 0.8f),
+        InferenceTestVariant("SAMPLE_TEMP_020", "Temperatur 0.20", 512, 64, 8, 8, BackendPreference.ACCELERATOR_REQUIRED, 0.2f, 20, 0.8f),
+        InferenceTestVariant("SAMPLE_TOPK_40", "Top-K 40", 512, 64, 8, 8, BackendPreference.ACCELERATOR_REQUIRED, 0.05f, 40, 0.8f),
+        InferenceTestVariant("SAMPLE_TOPP_095", "Top-P 0.95", 512, 64, 8, 8, BackendPreference.ACCELERATOR_REQUIRED, 0.05f, 20, 0.95f)
+    )
+
     val ALL_TESTS: List<PromptTestCase> = listOf(
         PromptTestCase(
             id = "TEST_PERFORMANCE",
@@ -98,7 +128,7 @@ object PromptTestCatalog {
             description = "Prüft eine knappe, grammatikalisch verständliche Erklärung mit genau zwei Sätzen.",
             prompt = "Erkläre in genau zwei kurzen, grammatikalisch korrekten deutschen Sätzen, was ein Dokumentenmanagementsystem ist und welchen Nutzen es bietet.",
             expectedKeywords = listOf("Dokument", "System"),
-            maxTokens = 64,
+            maxTokens = 96,
             timeoutSec = 180
         ),
         PromptTestCase(
@@ -109,6 +139,24 @@ object PromptTestCatalog {
             expectedKeywords = listOf("sender", "documentType", "date"),
             maxTokens = 112,
             timeoutSec = 240
+        ),
+        PromptTestCase(
+            id = "TEST_TUNING",
+            title = "4. Hardware-Tuning · CPU/GPU/8 Kerne",
+            description = "Vergleicht CPU-Generierung mit 2, 4, 6 und 8 Threads, 8 Prefill-Threads, ubatch 64/128 sowie Vulkan mit 4/8 Threads. Bewertet Messwerte statt Satzanzahl.",
+            prompt = "Ein Dokument wird lokal als PDF gespeichert. OCR wandelt den sichtbaren Inhalt in maschinenlesbaren Text um. Dieser Text wird für die Volltextsuche indexiert. Metadaten wie Absender und Datum werden nur übernommen, wenn sie im Dokument stehen. Erkläre in einem kurzen deutschen Satz den Zweck von OCR.",
+            expectedKeywords = listOf("OCR"),
+            maxTokens = 40,
+            timeoutSec = 180
+        ),
+        PromptTestCase(
+            id = "TEST_SAMPLING",
+            title = "5. Sampling-Tuning · Temperatur/Top-K/Top-P",
+            description = "Vergleicht fünf Sampling-Konfigurationen mit jeweils nur einer Parameteränderung gegenüber der Baseline. Prüft, ob kurze deutsche Antworten verständlich und thematisch passend bleiben.",
+            prompt = "Erkläre in genau einem kurzen deutschen Satz, wozu OCR bei der Dokumentenerfassung dient.",
+            expectedKeywords = listOf("OCR"),
+            maxTokens = 40,
+            timeoutSec = 120
         )
     )
 }

@@ -28,6 +28,15 @@ class PromptResultValidatorTest {
     }
 
     @Test
+    fun tuningWorkflowsValidateRelevantOutputWithoutExactSentenceCount() {
+        val relevant = "OCR wandelt ein Bild in maschinenlesbaren Text um."
+        val irrelevant = "OK"
+        assertTrue(PromptResultValidator.validate(test("TEST_TUNING"), relevant).passed)
+        assertTrue(PromptResultValidator.validate(test("TEST_SAMPLING"), relevant).passed)
+        assertFalse(PromptResultValidator.validate(test("TEST_TUNING"), irrelevant).passed)
+    }
+
+    @Test
     fun dmsWorkflowRequiresExactlyTwoSentences() {
         val good = "Ein Dokumentenmanagementsystem verwaltet digitale Dokumente zentral. Es erleichtert Suche, Ablage und Zugriff auf jedes System."
         val bad = "Ein System verwaltet Dokumente. Es hilft. Eine Suche ist möglich."

@@ -53,13 +53,13 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
             letterSpacing = 1.5.sp
         )
         Text(
-            text = "3 automatische Testabläufe",
+            text = "${PromptTestCatalog.ALL_TESTS.size} automatische Testabläufe",
             color = TextPrimary,
             fontSize = 20.sp,
             fontWeight = FontWeight.Bold
         )
         Text(
-            text = "Jeder Ablauf wird mit drei nativen Profilen verglichen. Alle Messwerte und Antworten werden getrennt gespeichert.",
+            text = "Drei Fachtests nutzen je drei Standardprofile. Zusätzlich gibt es einen 8-Profil-Hardwaretest und einen 5-Profil-Samplingtest.",
             color = TextSecondary,
             fontSize = 12.sp
         )
@@ -81,7 +81,19 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
                     )
                 }
                 Text(
-                    text = "Vulkan läuft zuletzt. In dieser llama.cpp-Version ist GPU-Abbruch nicht zuverlässig garantiert.",
+                    text = "Hardware-Tuning: ${PromptTestCatalog.TUNING_VARIANTS.size} Profile · CPU 2/4/6/8 Threads · Prefill 8 · ubatch 64/128 · Vulkan 4/8 Threads.",
+                    color = TextSecondary,
+                    fontSize = 9.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                Text(
+                    text = "Sampling-Tuning: ${PromptTestCatalog.SAMPLING_VARIANTS.size} Profile · Temperatur, Top-K und Top-P einzeln variieren.",
+                    color = TextSecondary,
+                    fontSize = 9.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                Text(
+                    text = "Vulkan läuft jeweils ohne verlässliche Abbruchgarantie.",
                     color = ElectricAmber,
                     fontSize = 10.sp
                 )
@@ -191,6 +203,11 @@ private fun PromptWorkflowCard(
     isAnyRunning: Boolean,
     onExecute: () -> Unit
 ) {
+    val profileCount = when (testCase.id) {
+        "TEST_TUNING" -> PromptTestCatalog.TUNING_VARIANTS.size
+        "TEST_SAMPLING" -> PromptTestCatalog.SAMPLING_VARIANTS.size
+        else -> PromptTestCatalog.PARAMETER_VARIANTS.size
+    }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = DarkSurface),
@@ -208,7 +225,7 @@ private fun PromptWorkflowCard(
             )
             Text(text = testCase.description, color = TextSecondary, fontSize = 12.sp)
             Text(
-                text = "3 Konfigurationen · bis zu ${testCase.timeoutSec}s je Lauf · max. ${testCase.maxTokens} Tokens",
+                text = "$profileCount Konfigurationen · bis zu ${testCase.timeoutSec}s je Lauf · max. ${testCase.maxTokens} Tokens",
                 color = TextMuted,
                 fontSize = 10.sp,
                 fontFamily = FontFamily.Monospace
@@ -240,7 +257,7 @@ private fun PromptWorkflowCard(
                     } else {
                         Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("3 Profile testen", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text("$profileCount Profile testen", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }

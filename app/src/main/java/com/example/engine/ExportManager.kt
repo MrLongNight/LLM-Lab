@@ -135,6 +135,9 @@ object ExportManager {
             obj.put("promptDecodeCalls", r.promptDecodeCalls)
             obj.put("generationDecodeCalls", r.generationDecodeCalls)
             obj.put("promptEvalDurationMs", r.promptEvalDurationMs)
+            obj.put("promptTokensPerSecond", if (r.promptEvalDurationMs > 0L) {
+                r.promptTokens * 1000.0 / r.promptEvalDurationMs.toDouble()
+            } else JSONObject.NULL)
             obj.put("generationDurationMs", r.generationDurationMs)
             obj.put("totalDurationMs", r.totalDurationMs)
             obj.put("tokensPerSecond", r.tokensPerSecond)
@@ -246,6 +249,10 @@ object ExportManager {
                 sb.appendLine("  Sampling          : temp=${r.temperature}, topK=${r.topK}, topP=${r.topP}, maxTokens=${r.maxTokens}")
                 sb.appendLine("  App-CPU-Anteil    : ${r.appCpuUsagePercent?.let { "${"%.1f".format(it)}% (prozessbezogen)" } ?: "nicht verfügbar"}")
                 sb.appendLine("  Prompt-Eval Dauer : ${r.promptEvalDurationMs} ms")
+                val promptTps = if (r.promptEvalDurationMs > 0L) {
+                    r.promptTokens * 1000.0 / r.promptEvalDurationMs.toDouble()
+                } else 0.0
+                sb.appendLine("  Prefill-Durchsatz : ${"%.2f".format(promptTps)} Tokens/s")
                 sb.appendLine("  Generierungsdauer : ${r.generationDurationMs} ms")
                 sb.appendLine("  Durchsatz         : ${"%.2f".format(r.tokensPerSecond)} Tokens/s")
                 sb.appendLine("  Gesamtdauer       : ${r.totalDurationMs} ms")

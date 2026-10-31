@@ -35,12 +35,12 @@ Die GitHub-Actions-Pipeline führt dieselben beiden Gradle-Aufgaben aus und ver�
 3. In LLM Lab den Bereich **Modell** öffnen und die GGUF-Datei über den System-Dateiauswahldialog auswählen.
 4. Die angezeigte Datei-/GGUF-Information prüfen und **Initialisieren** starten.
 5. Erst bei Status **Modell bereit** den Kurztest im Prompt-Labor ausführen.
-6. Im Prompt-Labor einen der drei automatischen Abläufe starten. Jeder Ablauf vergleicht CPU-Referenz, CPU-Wide-Batch und Vulkan-Offload und speichert alle drei Läufe getrennt. Danach optional den 3-fachen Stabilitätscheck ausführen.
+6. Im Prompt-Labor einen der drei fachlichen Abläufe starten. Jeder vergleicht CPU-Referenz, CPU-Wide-Batch und Vulkan-Offload. Der vierte Ablauf **Hardware-Tuning** führt acht CPU-/Vulkan-Konfigurationen aus (Generation 2/4/6/8 Threads, 8 Prefill-Threads, ubatch 64/128). Der fünfte Ablauf **Sampling-Tuning** vergleicht fünf Varianten, bei denen Temperatur, Top-K und Top-P einzeln verändert werden. Danach optional den 3-fachen Stabilitätscheck ausführen.
 7. Bei Fehlern TXT- und JSON-Diagnoseexport erzeugen. Chat-Prompt und Chat-Antwort werden in der lokalen Testhistorie redigiert gespeichert.
 
 ## Inferenzmesswerte
 
-Die JNI-Schicht liefert tatsächliche Werte aus `llama.cpp`: Prompt-Tokenisierung, Prompt-Tokenanzahl, Prompt-Evaluierungsdauer, Prompt-Decode-Aufrufe, First-Token-Latenz, generierte Tokens, Generierungsdauer, Generierungs-Decode-Aufrufe, Gesamtdauer und Tokens/s. Der Diagnoseexport weist zusätzlich die Zeit zwischen Prefill-Ende und erstem Token, die Profilvorbereitung sowie den Prozess-PSS inklusive anteilig gemappter Modellseiten aus. Es werden keine aus Prompt-Länge geschätzten Tokenzahlen oder simulierten Antworttexte als Inferenz ausgegeben.
+Die JNI-Schicht liefert tatsächliche Werte aus `llama.cpp`: Prompt-Tokenisierung, Prompt-Tokenanzahl, Prompt-Evaluierungsdauer, Prompt-Decode-Aufrufe, First-Token-Latenz, generierte Tokens, Generierungsdauer, Generierungs-Decode-Aufrufe, Gesamtdauer sowie getrennten Prefill- und Generierungsdurchsatz. Vor dem Abschluss der Prefill-Messung wird `llama_synchronize()` aufgerufen. Damit wird asynchron eingereichte Vulkan-Arbeit der Prompt-Evaluierung zugerechnet und nicht mehr fälschlich als Wartezeit nach dem Prefill ausgewiesen. Die CPU-Auslastung wird zusätzlich direkt um jeden Inferenzlauf gemessen, statt einen bis zu drei Sekunden alten Telemetrie-Snapshot zu verwenden. Der Diagnoseexport weist außerdem die Zeit zwischen abgeschlossenem Prefill und erstem Token, die Profilvorbereitung sowie den Prozess-PSS inklusive anteilig gemappter Modellseiten aus.
 
 Der Prompt-Callback meldet Fortschritt während der Prompt-Auswertung. Während der eigentlichen Token-Generierung wird der echte Token-Stream angezeigt. Gerätemesswerte, die Android nicht zuverlässig bereitstellt, müssen als nicht verfügbar behandelt werden. Der native Allocator-Heap umfasst nicht zwingend alle per `mmap` eingeblendeten Modellgewichte.
 
@@ -48,7 +48,7 @@ Der Prompt-Callback meldet Fortschritt während der Prompt-Auswertung. Während 
 
 Für reproduzierbare Vergleiche hält jeder Workflow `n_ctx=2048`, `n_batch=512`, Temperatur `0.05`, Top-k `20` und Top-p `0.8` konstant. Die drei Testprofile variieren Backend, Threads und Micro-Batch: CPU-Referenz (AUTO, 4/8 Threads, `n_ubatch=32`), CPU-Wide-Batch (CPU_ONLY, 4/8 Threads, `n_ubatch=64`) und Vulkan-Offload (ACCELERATOR_REQUIRED, 4/8 Threads, `n_ubatch=64`). Die maximale Tokenzahl ist je Workflow begrenzt.
 
-Das Prompt-Labor bietet drei automatische Workflows: (1) längere deutsche Antwort für Prefill-/Durchsatzmessung, (2) zweisätzige deutsche DMS-Erklärung und (3) synthetische Rechnungs-Extraktion mit sieben JSON-Feldern einschließlich `iban=null` und `poNumber=null`. Jeder Workflow wird nacheinander mit drei nativen Profilen ausgeführt; die ursprüngliche Modellkonfiguration wird anschließend wiederhergestellt. Bei CPU-zu-CPU-Profilwechseln wird nur der llama_context neu aufgebaut; die mmap-gemappten GGUF-Gewichte bleiben geladen. Nur ein Wechsel der CPU-/Vulkan-Gewichtplatzierung lädt das GGUF erneut.
+Das Prompt-Labor bietet fünf automatische Workflows: (1) längere deutsche Antwort für Prefill-/Durchsatzmessung, (2) zweisätzige deutsche DMS-Erklärung, (3) synthetische Rechnungs-Extraktion mit sieben JSON-Feldern einschließlich `iban=null` und `poNumber=null`, (4) Hardware-Tuning mit acht CPU-/Vulkan-Profilen, (5) Sampling-Tuning mit fünf Varianten. Beim Hardware-Tuning werden CPU-Generierung 2/4/6/8 Threads (Prefill konstant 8), CPU-ubatch 64/128 sowie Vulkan 4/8 Threads und ubatch 64/128 verglichen. Beim Sampling-Tuning bleibt das Vulkan-8/8-Profil konstant; Temperatur, Top-K und Top-P werden einzeln gegenüber der Baseline verändert. Die ursprüngliche Modellkonfiguration wird anschließend wiederhergestellt. Bei CPU-zu-CPU-Profilwechseln wird nur der llama_context neu aufgebaut; die mmap-gemappten GGUF-Gewichte bleiben geladen. Nur ein Wechsel der CPU-/Vulkan-Gewichtplatzierung lädt das GGUF erneut.
 
 Sampling-Parameter bleiben innerhalb eines Dreiervergleichs identisch, damit Unterschiede primär auf Backend, Threads und Micro-Batch zurückgeführt werden können. Native llama.cpp-Kernel werden auch im Debug-APK mit `-O3` kompiliert.
 
@@ -67,7 +67,7 @@ Ein grüner GitHub-Actions-Lauf beweist nur, dass die Android-App und die native
 Vor Übergabe an `myDocAnizer-Mobile` sind auf dem tatsächlichen Smartphone mindestens folgende Punkte zu protokollieren:
 
 - [ ] Modellinitialisierung mit dem angegebenen Qwen-GGUF erfolgreich, Status erst danach `Modell bereit`.
-- [ ] Alle drei automatischen Workflows laufen auf dem Smartphone und jede Profilvariante wird mit Backend, Offload-Log und Messwerten dokumentiert.
+- [ ] Alle fünf automatischen Workflows laufen auf dem Smartphone; acht Hardware-Profile und fünf Sampling-Profile werden mit den tatsächlich geladenen Parametern und Messwerten dokumentiert.
 - [ ] CPU-Referenz, CPU-Wide-Batch und Vulkan-Offload sind anhand tatsächlicher Ladeprotokolle und nicht nur der Backend-Auswahl verglichen.
 - [ ] Deutsche DMS-Antwort und Extraktion erfüllen ihre inhaltlichen Validatoren.
 - [ ] Tokenisierung, Prompt-Eval und Generierung zeigen plausible native Messwerte.

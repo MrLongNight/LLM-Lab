@@ -845,7 +845,8 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
         succeeded: Boolean,
         error: String?,
         profileSetupDurationMs: Long,
-        profileSetupMode: String
+        profileSetupMode: String,
+        appCpuUsagePercent: Float? = null
     ) {
         dao.insertRun(TestRunEntity(
             testCategory = "${testCase.id}_${variant.id}",
@@ -869,7 +870,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             topK = config.topK,
             topP = config.topP,
             maxTokens = config.maxTokens,
-            appCpuUsagePercent = _telemetry.value.appCpuUsagePercent,
+            appCpuUsagePercent = appCpuUsagePercent,
             profileSetupDurationMs = profileSetupDurationMs,
             profileSetupMode = profileSetupMode,
             processPssBytes = runCatching { Debug.getPss().toLong() * 1024L }.getOrDefault(0L),
@@ -895,12 +896,15 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         launchEngineOperation {
+            val variants = when (testCase.id) {
+                "TEST_TUNING" -> PromptTestCatalog.TUNING_VARIANTS
+                "TEST_SAMPLING" -> PromptTestCatalog.SAMPLING_VARIANTS
+                else -> PromptTestCatalog.PARAMETER_VARIANTS
+            }
             _labActiveTest.value = testCase
-            _labTestOutput.value = "Automatischer Profilvergleich gestartet: 3 Parameterprofile × 1 Test."
+            _labTestOutput.value = "Automatischer Vergleich gestartet: ${variants.size} native Profile × 1 Test."
             _labMetrics.value = null
             lastWorkflowBackendReport = ""
-
-            val variants = PromptTestCatalog.PARAMETER_VARIANTS
             val summaries = mutableListOf<String>()
             val backendEvidence = StringBuilder()
             var currentReady: ModelLifecycleState.Ready? = originalReady
@@ -945,11 +949,11 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                         nativeBridge.getActiveBackendName(), false, error,
                         profileSetupDurationMs, profileSetupMode
                     )
-                    backendEvidence.appendLine("Profil ${index + 1}/3 – ${variant.id}: MODELLLADEN FEHLGESCHLAGEN")
+                    backendEvidence.appendLine("Profil ${index + 1}/${variants.size} – ${variant.id}: MODELLLADEN FEHLGESCHLAGEN")
                     backendEvidence.appendLine(error)
                     backendEvidence.appendLine(nativeBridge.getModelLoadLog())
                     backendEvidence.appendLine()
-                    summaries += "Profil ${index + 1}/3 – ${variant.label}: FEHLGESCHLAGEN – $error"
+                    summaries += "Profil ${index + 1}/${variants.size} – ${variant.label}: FEHLGESCHLAGEN – $error"
                     currentReady = null
                     continue
                 }
@@ -979,7 +983,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                         line.contains("Vulkan0 KV buffer", ignoreCase = true) ||
                         line.contains("compute buffer", ignoreCase = true)
                 }
-                backendEvidence.appendLine("Profil ${index + 1}/3 – ${variant.id}: backend=${readyForVariant.activeBackendName}")
+                backendEvidence.appendLine("Profil ${index + 1}/${variants.size} – ${variant.id}: backend=${readyForVariant.activeBackendName}")
                 backendEvidence.appendLine("Profilvorbereitung : $profileSetupMode · ${profileSetupDurationMs} ms")
                 backendEvidence.appendLine("Modellgewichte GPU : ${weightGpuLayerLines.size} explizite Layer-Zuordnungen")
                 backendEvidence.appendLine("KV-Cache GPU       : ${kvGpuLayerLines.size} explizite Layer-Zuordnungen")
@@ -1003,21 +1007,29 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 val callback = object : InferenceCallback {
                     override fun onToken(tokenText: String, tokenIndex: Int) {
                         localStream.append(tokenText)
-                        _labTestOutput.value = "Profil ${index + 1}/3 – ${variant.label}\n" + localStream.toString()
+                        _labTestOutput.value = "Profil ${index + 1}/${variants.size} – ${variant.label}\n" + localStream.toString()
                     }
 
                     override fun onProgress(progressPercent: Float, step: Int) {
                         _labTestOutput.value =
-                            "Profil ${index + 1}/3 – ${variant.label}\nPrompt-Prefill: ${progressPercent.toInt()}% · Decode-Aufruf $step"
+                            "Profil ${index + 1}/${variants.size} – ${variant.label}\nPrompt-Prefill: ${progressPercent.toInt()}% · Decode-Aufruf $step"
                     }
                 }
 
+                val cpuTimeBeforeMs = android.os.Process.getElapsedCpuTime()
+                val wallTimeBeforeMs = SystemClock.elapsedRealtime()
                 val metrics = executeInferenceWithWatchdog(
                     prompt = testCase.prompt,
                     config = configForTest,
                     callback = callback,
                     timeoutSeconds = testCase.timeoutSec
                 )
+                val wallDurationMs = (SystemClock.elapsedRealtime() - wallTimeBeforeMs).coerceAtLeast(1L)
+                val cpuDurationMs = (android.os.Process.getElapsedCpuTime() - cpuTimeBeforeMs).coerceAtLeast(0L)
+                val cpuCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+                val cpuUsagePercent = (
+                    cpuDurationMs.toFloat() * 100f / (wallDurationMs.toFloat() * cpuCores)
+                ).coerceIn(0f, 100f)
                 _labMetrics.value = metrics
 
                 val response = localStream.toString()
@@ -1032,13 +1044,16 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 persistWorkflowRun(
                     testCase, variant, configForTest, metrics, response,
                     actualBackend, succeeded, error,
-                    profileSetupDurationMs, profileSetupMode
+                    profileSetupDurationMs, profileSetupMode, cpuUsagePercent
                 )
 
-                summaries += "Profil ${index + 1}/3 – ${variant.label}: ${if (succeeded) "BESTANDEN" else "FEHLGESCHLAGEN"} · ${metrics.finishReason}\n" +
-                    "First Token ${metrics.firstTokenDurationMs} ms · Prefill ${metrics.promptEvalDurationMs} ms / ${metrics.promptTokens} Tokens · " +
+                val prefillTokensPerSecond = if (metrics.promptEvalDurationMs > 0L) {
+                    metrics.promptTokens * 1000f / metrics.promptEvalDurationMs.toFloat()
+                } else 0f
+                summaries += "Profil ${index + 1}/${variants.size} – ${variant.label}: ${if (succeeded) "BESTANDEN" else "FEHLGESCHLAGEN"} · ${metrics.finishReason}\n" +
+                    "First Token ${metrics.firstTokenDurationMs} ms · Prefill ${metrics.promptEvalDurationMs} ms / ${metrics.promptTokens} Tokens (${"%.2f".format(prefillTokensPerSecond)} Tok/s) · " +
                     "Generierung ${metrics.generationDurationMs} ms / ${metrics.generatedTokens} Tokens · ${"%.2f".format(metrics.tokensPerSecond)} Tok/s\n" +
-                    "Backend: $actualBackend · Prompt-Decode: ${metrics.promptDecodeCalls} · Generation-Decode: ${metrics.generationDecodeCalls}\n" +
+                    "Backend: $actualBackend · Prompt-Decode: ${metrics.promptDecodeCalls} · Generation-Decode: ${metrics.generationDecodeCalls} · Prozess-CPU: ${"%.1f".format(cpuUsagePercent)}%\n" +
                     "Profilvorbereitung: $profileSetupMode · ${profileSetupDurationMs} ms · PSS: ${runCatching { Debug.getPss() }.getOrDefault(0)} KB\n" +
                     "Inhalt: ${validation.details}" +
                     (error?.let { "\nFehler: $it" } ?: "")
