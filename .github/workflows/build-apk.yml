@@ -48,6 +48,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y glslc libvulkan-dev
 
+      - name: Build host Vulkan shader generator
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOST_TOOLS="$RUNNER_TEMP/llmlab-host-tools"
+          mkdir -p "$HOST_TOOLS"
+          c++ -std=c++11 -O2 -pthread \
+            third_party/llama.cpp/ggml/src/vulkan-shaders/vulkan-shaders-gen.cpp \
+            -o "$HOST_TOOLS/vulkan-shaders-gen"
+          chmod +x "$HOST_TOOLS/vulkan-shaders-gen"
+          echo "$HOST_TOOLS" >> "$GITHUB_PATH"
+          "$HOST_TOOLS/vulkan-shaders-gen" --help >/dev/null 2>&1 || true
+          echo "Host Vulkan shader generator installed: $HOST_TOOLS/vulkan-shaders-gen"
+
       - name: Accept Android SDK Licenses and Install NDK/CMake
         shell: bash
         run: |
