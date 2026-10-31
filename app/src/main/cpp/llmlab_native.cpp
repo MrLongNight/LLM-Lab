@@ -9,6 +9,8 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
+#include <cstdint>
 #include <vector>
 
 #define TAG "LLMLabNative"
@@ -41,6 +43,95 @@ public:
 private:
     llama_batch batch_{};
 };
+
+
+size_t completeUtf8PrefixLength(const std::string& bytes) {
+    size_t i = 0;
+    while (i < bytes.size()) {
+        const auto lead = static_cast<uint8_t>(bytes[i]);
+        size_t width = 0;
+        if (lead <= 0x7F) width = 1;
+        else if (lead >= 0xC2 && lead <= 0xDF) width = 2;
+        else if (lead >= 0xE0 && lead <= 0xEF) width = 3;
+        else if (lead >= 0xF0 && lead <= 0xF4) width = 4;
+        else { ++i; continue; }
+
+        if (i + width > bytes.size()) break;
+        bool valid = true;
+        for (size_t j = 1; j < width; ++j) {
+            const auto continuation = static_cast<uint8_t>(bytes[i + j]);
+            if ((continuation & 0xC0) != 0x80) {
+                valid = false;
+                break;
+            }
+        }
+        if (valid && width == 3) {
+            const auto second = static_cast<uint8_t>(bytes[i + 1]);
+            if ((lead == 0xE0 && second < 0xA0) || (lead == 0xED && second >= 0xA0)) valid = false;
+        }
+        if (valid && width == 4) {
+            const auto second = static_cast<uint8_t>(bytes[i + 1]);
+            if ((lead == 0xF0 && second < 0x90) || (lead == 0xF4 && second > 0x8F)) valid = false;
+        }
+        i += valid ? width : 1;
+    }
+    return i;
+}
+
+std::u16string decodeUtf8ToUtf16(std::string_view input) {
+    std::u16string output;
+    output.reserve(input.size());
+    size_t i = 0;
+    while (i < input.size()) {
+        const auto lead = static_cast<uint8_t>(input[i]);
+        uint32_t codePoint = 0xFFFD;
+        size_t width = 1;
+        if (lead <= 0x7F) {
+            codePoint = lead;
+        } else {
+            if (lead >= 0xC2 && lead <= 0xDF) { codePoint = lead & 0x1F; width = 2; }
+            else if (lead >= 0xE0 && lead <= 0xEF) { codePoint = lead & 0x0F; width = 3; }
+            else if (lead >= 0xF0 && lead <= 0xF4) { codePoint = lead & 0x07; width = 4; }
+
+            bool valid = width > 1 && i + width <= input.size();
+            for (size_t j = 1; valid && j < width; ++j) {
+                const auto continuation = static_cast<uint8_t>(input[i + j]);
+                if ((continuation & 0xC0) != 0x80) valid = false;
+                else codePoint = (codePoint << 6) | (continuation & 0x3F);
+            }
+            if (valid) {
+                const bool invalidScalar =
+                    (width == 2 && codePoint < 0x80) ||
+                    (width == 3 && codePoint < 0x800) ||
+                    (width == 4 && codePoint < 0x10000) ||
+                    (codePoint >= 0xD800 && codePoint <= 0xDFFF) ||
+                    codePoint > 0x10FFFF;
+                if (invalidScalar) valid = false;
+            }
+            if (!valid) {
+                codePoint = 0xFFFD;
+                width = 1;
+            }
+        }
+
+        if (codePoint <= 0xFFFF) {
+            output.push_back(static_cast<char16_t>(codePoint));
+        } else {
+            codePoint -= 0x10000;
+            output.push_back(static_cast<char16_t>(0xD800 + (codePoint >> 10)));
+            output.push_back(static_cast<char16_t>(0xDC00 + (codePoint & 0x3FF)));
+        }
+        i += width;
+    }
+    return output;
+}
+
+jstring newJavaStringFromUtf8(JNIEnv* env, std::string_view value) {
+    const std::u16string utf16 = decodeUtf8ToUtf16(value);
+    return env->NewString(
+        reinterpret_cast<const jchar*>(utf16.data()),
+        static_cast<jsize>(utf16.size()));
+}
 
 void setNativeError(NativeGenerationMetrics& metrics, const std::string& message) {
     metrics.finish_reason = "NATIVE_ERROR";
@@ -83,6 +174,7 @@ void NativeLlamaEngine::clearModelLocked() {
         llama_model_ptr = nullptr;
     }
     loaded_model_path.clear();
+    loaded_model_architecture.clear();
 }
 
 bool NativeLlamaEngine::loadModel(
@@ -164,6 +256,17 @@ bool NativeLlamaEngine::loadModel(
 
     char modelDescription[256] = {};
     llama_model_desc(model, modelDescription, sizeof(modelDescription));
+    char architecture[128] = {};
+    const int32_t architectureLength = llama_model_meta_val_str(
+        model, "general.architecture", architecture, sizeof(architecture));
+    loaded_model_architecture = architectureLength > 0 ? architecture : "";
+    char templateMetadata[256] = {};
+    const int32_t templateMetadataLength = llama_model_meta_val_str(
+        model, "tokenizer.chat_template", templateMetadata, sizeof(templateMetadata));
+    LOGI("GGUF architecture=%s | chat_template_metadata=%s (%d bytes)",
+         loaded_model_architecture.empty() ? "unavailable" : loaded_model_architecture.c_str(),
+         templateMetadataLength > 0 ? "present" : "missing/truncated",
+         templateMetadataLength);
     LOGI("Modell vollständig geladen: %s | params=%llu | weights=%llu bytes | n_ctx=%u",
          modelDescription,
          static_cast<unsigned long long>(llama_model_n_params(model)),
@@ -252,14 +355,14 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
 
     llama_kv_cache_clear(llama_ctx_ptr);
 
-    // Give instruction-tuned models a concise, explicit system message.
+    // Keep the system message concise: a 1.5B model should not waste context
+    // or attention on a long policy prompt for ordinary chat questions.
     const std::string systemPrompt =
-        "Du bist ein hilfreicher, sachlicher Assistent. Antworte in der Sprache der Nutzerfrage. "
-        "Beantworte einfache Fragen direkt und knapp in ein bis vier kurzen Saetzen. "
-        "Gehe auf die konkrete Frage ein und stelle dich nicht unaufgefordert vor. "
-        "Behaupte nicht, ein Mensch oder ein Bewusstsein zu sein. "
-        "Erfinde keine Fakten; kennzeichne Unsicherheit klar. "
-        "Befolge angeforderte Ausgabeformate exakt.";
+        "Du bist ein sachlicher KI-Assistent. Antworte in der Sprache der Frage. "
+        "Beantworte die konkrete Frage direkt und korrekt, in höchstens zwei kurzen Sätzen, "
+        "wenn keine längere Antwort verlangt wird. Stelle dich nicht unaufgefordert vor. "
+        "Verwechsle Begriffe nicht mit Orten oder Personen. Erfinde keine Fakten. "
+        "Wenn du etwas nicht sicher weißt, sage das klar. Befolge gewünschte Formate exakt.";
 
     std::string formattedPrompt = prompt;
     bool addBos = true;
@@ -283,16 +386,35 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
             templateBuffer.data(), static_cast<int32_t>(templateBuffer.size()));
     }
 
+    std::string templateMode = "GGUF_DEFAULT";
     if (templateLength >= 0 &&
         templateLength <= static_cast<int32_t>(templateBuffer.size())) {
         formattedPrompt.assign(templateBuffer.data(), static_cast<size_t>(templateLength));
         addBos = false;
         parseSpecial = true;
+    } else if (loaded_model_architecture == "qwen2") {
+        // Qwen 2.5 Instruct uses ChatML. The built-in template formatter in the
+        // pinned llama.cpp build may not support every GGUF/Jinja variant, so
+        // use Qwen's exact role/end markers instead of a generic plain-text prefix.
+        formattedPrompt =
+            "<|im_start|>system\n" + systemPrompt + "<|im_end|>\n" +
+            "<|im_start|>user\n" + prompt + "<|im_end|>\n" +
+            "<|im_start|>assistant\n";
+        addBos = false;
+        parseSpecial = true;
+        templateMode = "QWEN2_CHATML_FALLBACK";
+        LOGW("GGUF default chat template not available; using explicit Qwen2 ChatML");
     } else {
-        // Retain the instruction prefix for custom templates without system-role support.
-        LOGW("GGUF Chat-Template unterstuetzt keine Systemrolle; verwende Text-Prefix");
-        formattedPrompt = systemPrompt + "\n\nNutzerfrage:\n" + prompt + "\n\nAntwort:";
+        setNativeError(metrics,
+            "Kein unterstütztes Chat-Template im GGUF gefunden (Architektur: " +
+            (loaded_model_architecture.empty() ? std::string("unbekannt") : loaded_model_architecture) +
+            "). Ohne korrektes Template wird keine Antwort generiert.");
+        return finish();
     }
+    LOGI("Chat template mode=%s architecture=%s prompt_chars=%zu",
+         templateMode.c_str(),
+         loaded_model_architecture.empty() ? "unavailable" : loaded_model_architecture.c_str(),
+         formattedPrompt.size());
 
     const int64_t tokenizeStartUs = llama_time_us();
     int32_t requiredTokens = llama_tokenize(
@@ -424,13 +546,12 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
     const int32_t maxTokens = std::max(1, config.max_tokens);
     // Allocate generation buffers once instead of rebuilding a full-vocabulary vector per token.
     std::vector<llama_token_data> candidates(static_cast<size_t>(vocabSize));
-    std::vector<llama_token> recentTokens;
-    const size_t repeatWindow = 64;
-    const size_t initialRecent = std::min(repeatWindow, promptTokens.size());
-    recentTokens.insert(recentTokens.end(), promptTokens.end() - static_cast<std::ptrdiff_t>(initialRecent), promptTokens.end());
     std::vector<char> pieceBuffer(256);
+    std::string pendingUtf8Bytes;
 
-    LOGI("Sampler: temperature=%.2f top_k=20 top_p=0.80 repeat_penalty=1.05", config.temperature);
+    // Do not penalize the user's prompt tokens. On small instruction models this
+    // can suppress key nouns from the question and degrade simple factual answers.
+    LOGI("Sampler: temperature=%.2f top_k=20 top_p=0.80 repeat_penalty=1.00", config.temperature);
     for (int32_t generated = 0; generated < maxTokens; ++generated) {
         if (isAbortRequested()) {
             metrics.finish_reason = "ABORTED_BY_USER";
@@ -451,9 +572,6 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
             candidates[static_cast<size_t>(token)].p = 0.0f;
         }
         llama_token_data_array candidatesArray{candidates.data(), candidates.size(), false};
-        llama_sample_repetition_penalties(
-            llama_ctx_ptr, &candidatesArray, recentTokens.data(), recentTokens.size(),
-            1.05f, 0.0f, 0.0f);
 
         llama_token sampledToken;
         if (config.temperature <= 0.0f) {
@@ -490,25 +608,29 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
             static_cast<size_t>(std::max<int32_t>(0, pieceSize)));
 
         metrics.generated_tokens++;
-        recentTokens.push_back(sampledToken);
-        if (recentTokens.size() > repeatWindow) recentTokens.erase(recentTokens.begin());
         if (metrics.first_token_time_us == 0) {
             metrics.first_token_time_us = std::max<int64_t>(0, llama_time_us() - totalStartUs);
         }
 
         if (callbackObj != nullptr && onTokenMethod != nullptr) {
-            jstring jToken = env->NewStringUTF(tokenText.c_str());
-            if (jToken == nullptr) {
-                setNativeError(metrics, "JNI konnte Token-Text nicht als Java-String bereitstellen");
-                return finish();
-            }
-            env->CallVoidMethod(callbackObj, onTokenMethod, jToken,
-                                static_cast<jint>(metrics.generated_tokens - 1));
-            env->DeleteLocalRef(jToken);
-            if (env->ExceptionCheck()) {
-                env->ExceptionClear();
-                setNativeError(metrics, "Kotlin-Callback für generierte Tokens hat eine Exception ausgelöst");
-                return finish();
+            pendingUtf8Bytes += tokenText;
+            const size_t completeBytes = completeUtf8PrefixLength(pendingUtf8Bytes);
+            if (completeBytes > 0) {
+                const std::string_view completeText(pendingUtf8Bytes.data(), completeBytes);
+                jstring jToken = newJavaStringFromUtf8(env, completeText);
+                if (jToken == nullptr) {
+                    setNativeError(metrics, "JNI konnte UTF-8 Token-Text nicht als Java-String bereitstellen");
+                    return finish();
+                }
+                env->CallVoidMethod(callbackObj, onTokenMethod, jToken,
+                                    static_cast<jint>(metrics.generated_tokens - 1));
+                env->DeleteLocalRef(jToken);
+                pendingUtf8Bytes.erase(0, completeBytes);
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                    setNativeError(metrics, "Kotlin-Callback für generierte Tokens hat eine Exception ausgelöst");
+                    return finish();
+                }
             }
         }
 
@@ -541,6 +663,20 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
         }
     }
 
+    if (callbackObj != nullptr && onTokenMethod != nullptr && !pendingUtf8Bytes.empty()) {
+        // Flush an incomplete trailing UTF-8 sequence as U+FFFD rather than
+        // dropping its bytes or passing malformed UTF-8 through NewStringUTF.
+        jstring jToken = newJavaStringFromUtf8(env, pendingUtf8Bytes);
+        if (jToken != nullptr) {
+            env->CallVoidMethod(callbackObj, onTokenMethod, jToken,
+                                static_cast<jint>(metrics.generated_tokens - 1));
+            env->DeleteLocalRef(jToken);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                setNativeError(metrics, "Kotlin-Callback beim UTF-8 Flush hat eine Exception ausgelöst");
+            }
+        }
+    }
     if (metrics.finish_reason.empty()) {
         metrics.finish_reason = "MAX_TOKENS";
     }

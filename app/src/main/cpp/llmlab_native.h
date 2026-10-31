@@ -72,6 +72,7 @@ private:
     llama_model* llama_model_ptr = nullptr;
     llama_context* llama_ctx_ptr = nullptr;
     std::string loaded_model_path;
+    std::string loaded_model_architecture;
     NativeInferenceConfig active_config;
 };
 

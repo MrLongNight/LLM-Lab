@@ -12,7 +12,7 @@ data class InferenceConfig(
     val nBatch: Int = 512,
     val nUbatch: Int = 32,
     val nThreads: Int = 4,
-    val temperature: Float = 0.7f,
+    val temperature: Float = 0.2f,
     val maxTokens: Int = 160,
     // Konfigurierbare Timeouts gemäß Spezifikation
     val timeoutInitSec: Int = 120,
