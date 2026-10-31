@@ -65,6 +65,24 @@ if(ANDROID AND (NOT DEFINED SPIRV-Headers_DIR OR "${SPIRV-Headers_DIR}" MATCHES 
 endif()
 
 add_subdirectory("${LLAMA_CPP_SOURCE}" "${CMAKE_BINARY_DIR}/llama.cpp" EXCLUDE_FROM_ALL)
+
+# Android's NDK ships Vulkan C headers but not Vulkan-Hpp. The host
+# libvulkan-dev package supplies the header-only C++ bindings required by
+# ggml-vulkan. Add only their include path; do not link the host Vulkan loader.
+if(ANDROID AND TARGET ggml-vulkan)
+    find_path(LLMLAB_VULKAN_HPP_INCLUDE_DIR
+        NAMES vulkan/vulkan.hpp
+        PATHS /usr/include /usr/local/include
+        NO_DEFAULT_PATH
+        NO_CMAKE_FIND_ROOT_PATH
+    )
+    if(NOT LLMLAB_VULKAN_HPP_INCLUDE_DIR)
+        message(FATAL_ERROR "Vulkan-Hpp headers not found. Install the host libvulkan-dev package.")
+    endif()
+    target_include_directories(ggml-vulkan SYSTEM PRIVATE
+        "${LLMLAB_VULKAN_HPP_INCLUDE_DIR}"
+    )
+endif()
 add_library(llmlab_native SHARED llmlab_native.cpp)
 target_include_directories(llmlab_native PRIVATE "${LLAMA_CPP_SOURCE}/include" "${LLAMA_CPP_SOURCE}/ggml/include")
 target_compile_features(llmlab_native PRIVATE cxx_std_17)
