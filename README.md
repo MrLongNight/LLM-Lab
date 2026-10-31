@@ -11,7 +11,7 @@ Eigenständige Android-Test-App zur Untersuchung echter lokaler GGUF-Inferenz au
 - Eigenständige Package-ID: `de.mrlongnight.llmlab`; `minSdk=29` (Android 10), `targetSdk=36`, ABIs `arm64-v8a` und `x86_64`.
 - Keine Firebase-, Gemini-, Cloud-, Login- oder externen KI-API-Abhängigkeiten. Das Manifest fordert keine Internet-Berechtigung an und Android-App-Backup ist deaktiviert.
 
-Die App darf „Modell bereit“ erst anzeigen, wenn `llama_load_model_from_file` und `llama_new_context_with_model` erfolgreich zurückgekehrt sind. Bei fehlender nativer Bibliothek gibt es keinen JVM-Ersatzpfad. Die Backend-Registry meldet pro Backend Initialisierbarkeit und Abbruchfähigkeit. In llama.cpp b3600 ist `abort_callback` laut Header nur bei CPU-Ausführung unterstützt: AUTO bevorzugt daher den sicher abbrechbaren CPU-Pfad; GPU-Offload ist ein ausdrücklich experimenteller Testmodus.
+Die App darf „Modell bereit“ erst anzeigen, wenn `llama_load_model_from_file` und `llama_new_context_with_model` erfolgreich zurückgekehrt sind. Bei fehlender nativer Bibliothek gibt es keinen JVM-Ersatzpfad. Die Backend-Registry meldet pro Backend Initialisierbarkeit und Abbruchfähigkeit. In der gepinnten llama.cpp-Version b11998 wird der sichere AUTO-Pfad auf CPU gehalten; Vulkan-Offload wird nur mit `ACCELERATOR_REQUIRED` erzwungen und bleibt wegen der fehlenden verlässlichen Abbruchgarantie ein experimenteller Testmodus.
 
 ## Build und Tests
 
@@ -35,7 +35,7 @@ Die GitHub-Actions-Pipeline führt dieselben beiden Gradle-Aufgaben aus und ver�
 3. In LLM Lab den Bereich **Modell** öffnen und die GGUF-Datei über den System-Dateiauswahldialog auswählen.
 4. Die angezeigte Datei-/GGUF-Information prüfen und **Initialisieren** starten.
 5. Erst bei Status **Modell bereit** den Kurztest im Prompt-Labor ausführen.
-6. Danach Chat, JSON-/Extraktionstests, Abbruchtests und zuletzt den 20-fachen Benchmark durchführen.
+6. Im Prompt-Labor einen der drei automatischen Abläufe starten. Jeder Ablauf vergleicht CPU-Referenz, CPU-Wide-Batch und Vulkan-Offload und speichert alle drei Läufe getrennt. Danach optional den 3-fachen Stabilitätscheck ausführen.
 7. Bei Fehlern TXT- und JSON-Diagnoseexport erzeugen. Chat-Prompt und Chat-Antwort werden in der lokalen Testhistorie redigiert gespeichert.
 
 ## Inferenzmesswerte
@@ -46,17 +46,17 @@ Der Prompt-Callback meldet Fortschritt während der Prompt-Auswertung. Während 
 
 ## Testprofile
 
-`n_ubatch` ist auf `1`, `4`, `8`, `16` und `32` einstellbar. Zusätzlich sind `n_ctx`, `n_batch`, `n_threads`, Temperatur, maximale Tokens und die Zeitlimits konfigurierbar. Die Standardprofile sind Balanced, Power Saver und Max Throughput.
+Für reproduzierbare Vergleiche hält jeder Workflow `n_ctx=2048`, `n_batch=512`, Temperatur `0.05`, Top-k `20` und Top-p `0.8` konstant. Die drei Testprofile variieren Backend, Threads und Micro-Batch: CPU-Referenz (AUTO, 4/8 Threads, `n_ubatch=32`), CPU-Wide-Batch (CPU_ONLY, 6/8 Threads, `n_ubatch=64`) und Vulkan-Offload (ACCELERATOR_REQUIRED, 4/8 Threads, `n_ubatch=64`). Die maximale Tokenzahl ist je Workflow begrenzt.
 
-Das Prompt-Labor prüft nicht nur, ob die native Engine beendet wurde, sondern wertet die tatsächliche Antwort aus: exaktes `OK`, zweisätzige deutsche Erklärung, JSON-Felder mit expliziten `null`-Werten, Briefextraktion inklusive Datum/Betrag, Halluzinationstest und drei Themenpunkte im Langtext. Der 10x-Test dokumentiert die einzelnen Antworten und deren Varianz.
+Das Prompt-Labor bietet drei automatische Workflows: (1) längere deutsche Antwort für Prefill-/Durchsatzmessung, (2) zweisätzige deutsche DMS-Erklärung und (3) synthetische Rechnungs-Extraktion mit sieben JSON-Feldern einschließlich `iban=null` und `poNumber=null`. Jeder Workflow wird nacheinander mit drei nativen Profilen ausgeführt; die ursprüngliche Modellkonfiguration wird anschließend wiederhergestellt.
 
-Der Standard-Samplingpfad verwendet Top-k=40, Top-p=0,90, Temperatur 0,25 und einen Wiederholungs-Guard; die Vokabularpuffer werden pro Inferenz wiederverwendet. Native llama.cpp-Kernel werden auch im Debug-APK mit `-O3` kompiliert.
+Sampling-Parameter bleiben innerhalb eines Dreiervergleichs identisch, damit Unterschiede primär auf Backend, Threads und Micro-Batch zurückgeführt werden können. Native llama.cpp-Kernel werden auch im Debug-APK mit `-O3` kompiliert.
 
-Der Stresstest führt bis zu 20 echte Inferenzläufe aus und wertet nur exakt passende `OK`-Antworten als inhaltlich erfolgreich. Timeout, nativer Fehler oder eine falsche Antwort beenden den Lauf automatisch.
+Der separate Stabilitätscheck führt drei echte Kurz-Inferenzen aus. Timeout, nativer Fehler oder eine falsche Antwort beenden den Lauf automatisch.
 
 ## Abbruch- und Timeout-Verhalten
 
-Die Kotlin-Schicht sendet bei manuellem Abbruch oder Timeout ein natives Abbruchsignal; `llama.cpp` erhält einen Abort-Callback. Vorgesehene Timeouts: Modellinitialisierung 120 s, Kurztest 30 s, normale Inferenz 90 s, Stresstest je Lauf 120 s.
+Die Kotlin-Schicht sendet bei manuellem Abbruch oder Timeout ein natives Abbruchsignal. Der sichere AUTO-/CPU-Pfad nutzt den llama.cpp-Abort-Callback; der Vulkan-Offload-Modus hat in der gepinnten Version keine verlässliche Abbruchgarantie. Timeouts: Modellinitialisierung 120 s, normale Inferenz 120 s, Performance- und DMS-Workflow je Profil 180 s, Extraktion je Profil 240 s, Stabilitätscheck je Lauf 120 s.
 
 Wichtige technische Grenze: Ein nativer C/C++-Aufruf kann von Kotlin nicht sicher zwangsweise beendet werden. Reagiert die native Operation 10 Sekunden nach dem Abbruchsignal weiterhin nicht, markiert die App die Engine als nicht mehr antwortfähig, blockiert weitere Engine-Operationen und fordert einen Neustart der App. Das ist ein diagnostizierter Fehlerzustand, kein erfolgreicher Abbruch. Ob die reale Zielgeräte-/llama.cpp-Kombination innerhalb des Grenzwerts reagiert, muss auf dem Smartphone geprüft werden.
 
@@ -67,13 +67,13 @@ Ein grüner GitHub-Actions-Lauf beweist nur, dass die Android-App und die native
 Vor Übergabe an `myDocAnizer-Mobile` sind auf dem tatsächlichen Smartphone mindestens folgende Punkte zu protokollieren:
 
 - [ ] Modellinitialisierung mit dem angegebenen Qwen-GGUF erfolgreich, Status erst danach `Modell bereit`.
-- [ ] Kurztest liefert tatsächlich exakt `OK`.
-- [ ] Der einfache Halloween-Wissenstest nennt korrekt den 31. Oktober und antwortet in zwei knappen Sätzen.
-- [ ] Deutscher Test, JSON-Test und Extraktion bestehen die inhaltliche Validierung.
+- [ ] Alle drei automatischen Workflows laufen auf dem Smartphone und jede Profilvariante wird mit Backend, Offload-Log und Messwerten dokumentiert.
+- [ ] CPU-Referenz, CPU-Wide-Batch und Vulkan-Offload sind anhand tatsächlicher Ladeprotokolle und nicht nur der Backend-Auswahl verglichen.
+- [ ] Deutsche DMS-Antwort und Extraktion erfüllen ihre inhaltlichen Validatoren.
 - [ ] Tokenisierung, Prompt-Eval und Generierung zeigen plausible native Messwerte.
 - [ ] Manueller Abbruch und jede Timeout-Klasse kehren innerhalb der festgelegten Grenzen zurück.
 - [ ] Nach Abbruch kann unmittelbar eine neue Inferenz gestartet werden.
-- [ ] 20 aufeinanderfolgende Tests laufen ohne Hänger; Erfolgs-/Fehler-/Timeout-Zahlen, Mittelwert, p50 und p95 werden dokumentiert.
+- [ ] Der 3-fache Stabilitätscheck läuft ohne Hänger; Erfolg, Fehler, Timeout, Mittelwert, p50 und p95 werden dokumentiert.
 - [ ] TXT- und JSON-Export sind auf dem Smartphone erzeugt und enthalten Modell-/Engine-Version, Parameter und Testresultate.
 
 Bis diese Zielgerätetests durchgeführt und dokumentiert sind, ist der Prototyp **buildfähig mit integrierter llama.cpp-Engine**, aber noch nicht als auf dem Smartphone funktionsfähig abgenommen.

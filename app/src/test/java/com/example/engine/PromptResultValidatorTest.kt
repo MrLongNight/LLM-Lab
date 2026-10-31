@@ -20,44 +20,28 @@ class PromptResultValidatorTest {
     }
 
     @Test
-    fun shortTestOnlyAcceptsExactOk() {
-        assertTrue(PromptResultValidator.validate(test("TEST_1_OK"), "OK").passed)
-        assertFalse(PromptResultValidator.validate(test("TEST_1_OK"), "OK, gern.").passed)
+    fun throughputWorkflowRequiresSubstantialGermanOutput() {
+        val good = "Ein DMS erfasst digitale Dokumente und ordnet sie anhand zusätzlicher Metadaten. Die integrierte Suche findet Inhalte zuverlässig über zuvor durchgeführte OCR Verarbeitung. Das Archiv speichert Unterlagen sicher und hält wichtige Informationen dauerhaft nachvollziehbar bereit. Berechtigte Nutzer können Dokumente später schnell auffinden und verwalten. Dadurch sinkt der manuelle Aufwand im täglichen Arbeitsablauf deutlich."
+        val bad = "Dokumente sind da."
+        assertTrue(PromptResultValidator.validate(test("TEST_PERFORMANCE"), good).passed)
+        assertFalse(PromptResultValidator.validate(test("TEST_PERFORMANCE"), bad).passed)
     }
 
     @Test
-    fun jsonRequiresUnknownValuesToBeNull() {
-        assertTrue(PromptResultValidator.validate(test("TEST_3_JSON"), """{"documentType":null,"sender":null,"date":null}""").passed)
-        assertFalse(PromptResultValidator.validate(test("TEST_3_JSON"), """{"documentType":"Rechnung","sender":null,"date":null}""").passed)
+    fun dmsWorkflowRequiresExactlyTwoSentences() {
+        val good = "Ein Dokumentenmanagementsystem verwaltet digitale Dokumente zentral. Es erleichtert Suche, Ablage und Zugriff auf jedes System."
+        val bad = "Ein System verwaltet Dokumente. Es hilft. Eine Suche ist möglich."
+        assertTrue(PromptResultValidator.validate(test("TEST_DMS"), good).passed)
+        assertFalse(PromptResultValidator.validate(test("TEST_DMS"), bad).passed)
     }
 
     @Test
-    fun extractionChecksKnownSampleValues() {
-        val output = """{"sender":"Praxis Dr. med. Martin Müller","documentType":"Rechnung","date":"2026-03-15","totalAmount":149.50}"""
-        assertTrue(PromptResultValidator.validate(test("TEST_4_EXTRACTION"), output).passed)
-    }
-
-    @Test
-    fun hallucinationRequiresExplicitNulls() {
-        assertTrue(PromptResultValidator.validate(test("TEST_5_HALLUCINATION"), """{"iban":null,"poNumber":null}""").passed)
-        assertFalse(PromptResultValidator.validate(test("TEST_5_HALLUCINATION"), """{"iban":"DE123","poNumber":null}""").passed)
-    }
-
-    @Test
-    fun halloweenQuestionRequiresCorrectDateAndShortGermanAnswer() {
-        val good = "Halloween wird am 31. Oktober gefeiert. Viele Menschen verkleiden sich und Kinder sammeln Süßigkeiten."
-        val bad = "Halloween ist irgendwann im November. Es gibt Süßigkeiten."
-        assertTrue(PromptResultValidator.validate(test("TEST_8_SIMPLE_HALLOWEEN"), good).passed)
-        assertFalse(PromptResultValidator.validate(test("TEST_8_SIMPLE_HALLOWEEN"), bad).passed)
-    }
-
-    @Test
-    fun longContextRequiresThreeBullets() {
-        val output = """
-            - Aufbewahrung: zehn Jahre.
-            - Zugriff: Rollen steuern Rechte.
-            - Extraktion: unbekannt wird null.
-        """.trimIndent()
-        assertTrue(PromptResultValidator.validate(test("TEST_6_LONG_CONTEXT"), output).passed)
+    fun extractionWorkflowChecksGroundedValuesAndNullsTogether() {
+        val good = """{"sender":"Praxis Dr. med. Martin Müller","documentType":"Rechnung","date":"2026-03-15","invoiceNumber":"2026-9812","totalAmount":149.50,"iban":null,"poNumber":null}"""
+        val wrongPo = """{"sender":"Praxis Dr. med. Martin Müller","documentType":"Rechnung","date":"2026-03-15","invoiceNumber":"2026-9812","totalAmount":149.50,"iban":null,"poNumber":"2026-9812"}"""
+        val wrongAmount = """{"sender":"Praxis Dr. med. Martin Müller","documentType":"Rechnung","date":"2026-03-15","invoiceNumber":"2026-9812","totalAmount":149.00,"iban":null,"poNumber":null}"""
+        assertTrue(PromptResultValidator.validate(test("TEST_EXTRACTION"), good).passed)
+        assertFalse(PromptResultValidator.validate(test("TEST_EXTRACTION"), wrongPo).passed)
+        assertFalse(PromptResultValidator.validate(test("TEST_EXTRACTION"), wrongAmount).passed)
     }
 }

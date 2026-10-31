@@ -24,6 +24,53 @@ namespace {
 std::once_flag g_backend_init_once;
 std::string g_native_library_dir;
 
+struct ModelLoadLogCapture {
+    std::string text;
+    ggml_log_callback previous_callback = nullptr;
+    void* previous_user_data = nullptr;
+    std::mutex text_mutex;
+};
+
+void modelLoadLogCallback(enum ggml_log_level level, const char* message, void* userData) {
+    auto* capture = static_cast<ModelLoadLogCapture*>(userData);
+    if (capture != nullptr && message != nullptr) {
+        {
+            std::lock_guard<std::mutex> lock(capture->text_mutex);
+            constexpr size_t maxLogBytes = 64 * 1024;
+            if (capture->text.size() < maxLogBytes) {
+                const size_t remaining = maxLogBytes - capture->text.size();
+                capture->text.append(message, std::min(remaining, std::strlen(message)));
+            }
+        }
+        if (capture->previous_callback != nullptr) {
+            capture->previous_callback(level, message, capture->previous_user_data);
+        }
+    } else if (capture != nullptr && capture->previous_callback != nullptr) {
+        capture->previous_callback(level, message, capture->previous_user_data);
+    }
+}
+
+class ScopedModelLoadLogCapture {
+public:
+    explicit ScopedModelLoadLogCapture(std::string& destination) : destination_(destination) {
+        llama_log_get(&capture_.previous_callback, &capture_.previous_user_data);
+        llama_log_set(&modelLoadLogCallback, &capture_);
+    }
+
+    ~ScopedModelLoadLogCapture() {
+        llama_log_set(capture_.previous_callback, capture_.previous_user_data);
+        std::lock_guard<std::mutex> lock(capture_.text_mutex);
+        destination_ = capture_.text;
+    }
+
+    ScopedModelLoadLogCapture(const ScopedModelLoadLogCapture&) = delete;
+    ScopedModelLoadLogCapture& operator=(const ScopedModelLoadLogCapture&) = delete;
+
+private:
+    std::string& destination_;
+    ModelLoadLogCapture capture_;
+};
+
 class ScopedBatch {
 public:
     explicit ScopedBatch(int32_t capacity)
@@ -239,6 +286,7 @@ void NativeLlamaEngine::clearModelLocked() {
     loaded_model_path.clear();
     loaded_model_architecture.clear();
     active_backend_name = "CPU";
+    model_load_log.clear();
     active_gpu_layers_requested = 0;
     active_backend_device = nullptr;
 }
@@ -256,6 +304,7 @@ bool NativeLlamaEngine::loadModel(const std::string& path,const NativeInferenceC
     params.devices=useAccelerator?devices:nullptr;
     params.progress_callback=&NativeLlamaEngine::modelLoadProgress;
     params.progress_callback_user_data=this;
+    ScopedModelLoadLogCapture logCapture(model_load_log);
     llama_model* model=llama_model_load_from_file(path.c_str(),params);
     if(!model){outError=isAbortRequested()?"Modellladen abgebrochen":(useAccelerator?"Accelerator-Modellladen fehlgeschlagen":"llama_model_load_from_file fehlgeschlagen");LOGE("%s",outError.c_str());return false;}
     if(isAbortRequested()){llama_model_free(model);outError="Modellladen abgebrochen";return false;}
@@ -321,6 +370,11 @@ std::string NativeLlamaEngine::getActiveBackendName() const {
         return active_backend_name + " (experimenteller Offload; Abbruch nicht garantiert; Layerzahl siehe llama.cpp-Load-Log)";
     }
     return "CPU";
+}
+
+std::string NativeLlamaEngine::getModelLoadLog() const {
+    std::lock_guard<std::mutex> lock(engine_mutex);
+    return model_load_log;
 }
 
 int64_t NativeLlamaEngine::getNativeAllocatedHeap() const {
@@ -503,7 +557,7 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
     }
     llama_batch& batch = batchHolder.get();
 
-    // Prompt-Evaluierung in logischen n_batch-Blöcken; llama.cpp teilt intern in n_ubatch auf.
+    // Prompt-Evaluierung in begrenzten n_ubatch-Blöcken; nur der letzte Prompt-Token benötigt Logits.
     const int64_t promptEvalStartUs = llama_time_us();
     size_t evaluated = 0;
     while (evaluated < promptTokens.size()) {
@@ -525,7 +579,7 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
             batch.pos[i] = static_cast<llama_pos>(absolutePosition);
             batch.n_seq_id[i] = 1;
             batch.seq_id[i][0] = 0;
-            batch.logits[i] = (i + 1 == count) ? 1 : 0;
+            batch.logits[i] = (absolutePosition + 1 == promptTokens.size()) ? 1 : 0;
         }
 
         const int decodeResult = llama_decode(llama_ctx_ptr, batch);
@@ -709,6 +763,12 @@ JNIEXPORT jstring JNICALL
 Java_com_example_engine_LlamaNativeBridge_nativeGetActiveBackendName(JNIEnv* env, jobject /* this */, jlong handle) {
     if (handle == 0) return newJavaStringFromUtf8(env, "Native Engine nicht verfügbar");
     return newJavaStringFromUtf8(env, reinterpret_cast<NativeLlamaEngine*>(handle)->getActiveBackendName());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_example_engine_LlamaNativeBridge_nativeGetModelLoadLog(JNIEnv* env, jobject /* this */, jlong handle) {
+    if (handle == 0) return newJavaStringFromUtf8(env, "");
+    return newJavaStringFromUtf8(env, reinterpret_cast<NativeLlamaEngine*>(handle)->getModelLoadLog());
 }
 
 JNIEXPORT jlong JNICALL

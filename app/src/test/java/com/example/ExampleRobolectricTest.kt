@@ -9,6 +9,7 @@ import com.example.data.TestRunEntity
 import com.example.engine.GgufMetadataParser
 import com.example.engine.GgufInfo
 import com.example.engine.InferenceConfig
+import com.example.engine.BackendPreference
 import com.example.engine.InferenceCallback
 import com.example.engine.LlamaNativeBridge
 import com.example.engine.ProfilePreset
@@ -133,22 +134,23 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `verify PromptTestCatalog contains all 8 required test cases`() {
-        val tests = PromptTestCatalog.ALL_TESTS
-        assertEquals(8, tests.size)
+    fun `verify PromptTestCatalog contains three workflows and three parameter profiles`() {
+        val workflows = PromptTestCatalog.ALL_TESTS
+        assertEquals(3, workflows.size)
+        assertEquals(
+            listOf("TEST_PERFORMANCE", "TEST_DMS", "TEST_EXTRACTION"),
+            workflows.map { it.id }
+        )
 
-        val ids = tests.map { it.id }
-        assertTrue(ids.contains("TEST_1_OK"))
-        assertTrue(ids.contains("TEST_2_DMS"))
-        assertTrue(ids.contains("TEST_3_JSON"))
-        assertTrue(ids.contains("TEST_4_EXTRACTION"))
-        assertTrue(ids.contains("TEST_5_HALLUCINATION"))
-        assertTrue(ids.contains("TEST_6_LONG_CONTEXT"))
-        assertTrue(ids.contains("TEST_7_REPEAT_10X"))
-        assertTrue(ids.contains("TEST_8_SIMPLE_HALLOWEEN"))
-
-        val repeatTest = tests.first { it.id == "TEST_7_REPEAT_10X" }
-        assertEquals(10, repeatTest.repetitionCount)
+        val variants = PromptTestCatalog.PARAMETER_VARIANTS
+        assertEquals(3, variants.size)
+        assertEquals(
+            listOf("CPU_REFERENCE", "CPU_WIDEBATCH", "VULKAN_OFFLOAD"),
+            variants.map { it.id }
+        )
+        assertEquals(BackendPreference.ACCELERATOR_REQUIRED, variants.last().backendPreference)
+        assertEquals(32, variants.first().nUbatch)
+        assertEquals(64, variants[1].nUbatch)
     }
 
     @Test

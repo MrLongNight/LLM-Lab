@@ -9,7 +9,7 @@ data class TestRunEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,
     val timestamp: Long = System.currentTimeMillis(),
-    val testCategory: String, // CHAT, LAB_SHORT_OK, LAB_GERMAN_DMS, LAB_JSON, LAB_EXTRACTION, LAB_HALLUCINATION, LAB_LONG_CONTEXT, LAB_REPEAT_10X, BENCHMARK_STRESS
+    val testCategory: String, // CHAT, TEST_PERFORMANCE_*, TEST_DMS_*, TEST_EXTRACTION_*, BENCHMARK_STRESS
     val testTitle: String,
     val promptText: String,
     val responseText: String,

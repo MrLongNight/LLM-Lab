@@ -66,6 +66,7 @@ public:
 
     int64_t getNativeAllocatedHeap() const;
     std::string getActiveBackendName() const;
+    std::string getModelLoadLog() const;
 
 private:
     static bool modelLoadProgress(float progress, void* userData);
@@ -80,6 +81,7 @@ private:
     std::string loaded_model_path;
     std::string loaded_model_architecture;
     std::string active_backend_name = "CPU";
+    std::string model_load_log;
     int active_gpu_layers_requested = 0;
     ggml_backend_dev_t active_backend_device = nullptr;
     NativeInferenceConfig active_config;

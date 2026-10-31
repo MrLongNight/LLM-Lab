@@ -21,6 +21,7 @@ import com.example.engine.ProfilePreset
 import com.example.engine.PromptResultValidator
 import com.example.engine.PromptTestCatalog
 import com.example.engine.PromptTestCase
+import com.example.engine.InferenceTestVariant
 import com.example.engine.SystemTelemetry
 import com.example.engine.SystemTelemetryManager
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +39,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InterruptedIOException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.text.DecimalFormat
 
 data class ChatMessage(
@@ -144,6 +146,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     val benchmarkSummary: StateFlow<BenchmarkSummary> = _benchmarkSummary.asStateFlow()
 
     private val _exportStatus = MutableStateFlow<String?>(null)
+    @Volatile private var lastWorkflowBackendReport: String = ""
     val exportStatus: StateFlow<String?> = _exportStatus.asStateFlow()
 
     val testRunHistory = dao.getRecentRuns(200).stateIn(
@@ -155,6 +158,18 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     private var activeInferenceJob: Job? = null
     @Volatile private var engineOperationGeneration: Long = 0L
     private val nativeEngineUnresponsive = AtomicBoolean(false)
+    private val nativeCallInProgress = AtomicBoolean(false)
+    private val nativeCallGeneration = AtomicLong(0L)
+
+    private fun beginNativeCall() {
+        nativeCallGeneration.incrementAndGet()
+        nativeCallInProgress.set(true)
+    }
+
+    private fun endNativeCall() {
+        nativeCallInProgress.set(false)
+        nativeCallGeneration.incrementAndGet()
+    }
 
     private companion object {
         const val NATIVE_ABORT_GRACE_MS = 10_000L
@@ -179,11 +194,16 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
      * JNI calls are blocking. Operations are serialized and the next operation
      * waits for the previous native call to return after its abort signal.
      */
-    private fun monitorNativeAbortResponsiveness(operation: Job?, phase: String) {
+    private fun monitorNativeAbortResponsiveness(
+        operation: Job?,
+        phase: String,
+        expectedNativeCallGeneration: Long = nativeCallGeneration.get()
+    ) {
         if (operation == null) return
         viewModelScope.launch(Dispatchers.Default) {
             delay(NATIVE_ABORT_GRACE_MS)
-            if (operation.isActive) {
+            if (operation.isActive && nativeCallInProgress.get() &&
+                nativeCallGeneration.get() == expectedNativeCallGeneration) {
                 nativeEngineUnresponsive.set(true)
                 val message = "$phase: Der native JNI-Aufruf hat das Abbruchsignal nicht innerhalb von ${NATIVE_ABORT_GRACE_MS / 1000}s quittiert. Die Engine kann nicht sicher gewaltsam beendet werden. Bitte LLM Lab neu starten."
                 _modelState.value = ModelLifecycleState.Error(message)
@@ -246,7 +266,12 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         return try {
-            val nativeMetrics = nativeBridge.executeInference(prompt, config, callback)
+            val nativeMetrics = try {
+                beginNativeCall()
+                nativeBridge.executeInference(prompt, config, callback)
+            } finally {
+                endNativeCall()
+            }
             when {
                 nativeEngineUnresponsive.get() -> nativeMetrics.copy(
                     finishReason = "NATIVE_ERROR",
@@ -449,7 +474,12 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
 
                 val configForLoad = _config.value
                 val outError = arrayOfNulls<String>(1)
-                val loadSuccess = nativeBridge.loadModel(cacheModel.absolutePath, configForLoad, outError)
+                val loadSuccess = try {
+                    beginNativeCall()
+                    nativeBridge.loadModel(cacheModel.absolutePath, configForLoad, outError)
+                } finally {
+                    endNativeCall()
+                }
 
                 if (timedOut.get() || nativeBridge.isAbortRequested()) {
                     if (loadSuccess) nativeBridge.unloadModel()
@@ -685,49 +715,214 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
 
     // ----------------- PROMPT-LABOR -----------------
 
+    /**
+     * Reload the already-copied GGUF with a new native configuration.
+     * The workflow runs serially on the engine-operation dispatcher.
+     */
+    private suspend fun reloadCachedModelForTest(
+        baseReady: ModelLifecycleState.Ready,
+        config: InferenceConfig
+    ): ModelLifecycleState.Ready? {
+        val cacheModel = File(getApplication<Application>().filesDir, "active_model.gguf")
+        if (!cacheModel.isFile || cacheModel.length() <= 0L) {
+            _modelState.value = ModelLifecycleState.Error(
+                "Die interne Modellkopie fehlt. Bitte das GGUF-Modell erneut initialisieren."
+            )
+            return null
+        }
+
+        val timeoutSeconds = config.timeoutInitSec.coerceAtLeast(1)
+        val timedOut = AtomicBoolean(false)
+        val watchdog = viewModelScope.launch(Dispatchers.Default) {
+            delay(timeoutSeconds * 1000L)
+            timedOut.set(true)
+            _modelState.value = ModelLifecycleState.Aborting
+            nativeBridge.requestAbort()
+            monitorNativeAbortResponsiveness(activeInferenceJob, "Testprofil-Modellinitialisierung")
+        }
+
+        try {
+            _modelState.value = ModelLifecycleState.Initializing(
+                null, "Wechsle Testprofil und lade den nativen Context...", 0
+            )
+            nativeBridge.unloadModel()
+            nativeBridge.prepareForOperation()
+            val errors = arrayOfNulls<String>(1)
+            val startedAt = System.currentTimeMillis()
+            val loaded = try {
+                beginNativeCall()
+                nativeBridge.loadModel(cacheModel.absolutePath, config, errors)
+            } finally {
+                endNativeCall()
+            }
+
+            if (timedOut.get() || nativeBridge.isAbortRequested()) {
+                if (loaded) nativeBridge.unloadModel()
+                _modelState.value = ModelLifecycleState.Error(
+                    if (timedOut.get()) "TIMEOUT: Modellinitialisierung des Testprofils überschritt ${timeoutSeconds}s."
+                    else "Modellinitialisierung des Testprofils wurde abgebrochen."
+                )
+                return null
+            }
+            if (!loaded) {
+                _modelState.value = ModelLifecycleState.Error(
+                    errors[0] ?: "Das Modell konnte für dieses Testprofil nicht geladen werden."
+                )
+                return null
+            }
+
+            return baseReady.copy(
+                initDurationMs = System.currentTimeMillis() - startedAt,
+                loadedConfig = config,
+                activeBackendName = nativeBridge.getActiveBackendName()
+            )
+        } catch (error: Throwable) {
+            _modelState.value = ModelLifecycleState.Error(
+                "Fehler beim Laden des Testprofils: ${error.message ?: error.javaClass.simpleName}"
+            )
+            return null
+        } finally {
+            watchdog.cancel()
+        }
+    }
+
+    private suspend fun persistWorkflowRun(
+        testCase: PromptTestCase,
+        variant: InferenceTestVariant,
+        config: InferenceConfig,
+        metrics: NativeMetrics,
+        response: String,
+        activeBackend: String,
+        succeeded: Boolean,
+        error: String?
+    ) {
+        dao.insertRun(TestRunEntity(
+            testCategory = "${testCase.id}_${variant.id}",
+            testTitle = "${testCase.title} – ${variant.label}",
+            promptText = testCase.prompt,
+            responseText = response,
+            promptTokens = metrics.promptTokens,
+            generatedTokens = metrics.generatedTokens,
+            promptEvalDurationMs = metrics.promptEvalDurationMs,
+            generationDurationMs = metrics.generationDurationMs,
+            tokensPerSecond = metrics.tokensPerSecond,
+            totalDurationMs = metrics.totalDurationMs,
+            nCtx = config.nCtx,
+            nBatch = config.nBatch,
+            nUbatch = config.nUbatch,
+            nThreads = config.nThreads,
+            nThreadsBatch = config.nThreadsBatch,
+            backendPreference = config.backendPreference.name,
+            activeBackend = activeBackend,
+            temperature = config.temperature,
+            topK = config.topK,
+            topP = config.topP,
+            maxTokens = config.maxTokens,
+            appCpuUsagePercent = _telemetry.value.appCpuUsagePercent,
+            finishReason = metrics.finishReason,
+            isSuccess = succeeded,
+            errorMessage = error,
+            javaHeapBytes = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory(),
+            nativeHeapBytes = nativeBridge.getAllocatedHeap(),
+            modelName = lastModelSelection?.fileName ?: "Unbekanntes Modell",
+            promptTokenizeDurationMs = metrics.promptTokenizeDurationMs,
+            firstTokenDurationMs = metrics.firstTokenDurationMs,
+            promptDecodeCalls = metrics.promptDecodeCalls,
+            generationDecodeCalls = metrics.generationDecodeCalls
+        ))
+    }
+
     fun runLabTest(testCase: PromptTestCase) {
-        val readyState = _modelState.value as? ModelLifecycleState.Ready ?: return
-        val configForTest = _config.value
-        if (!readyState.loadedConfig.hasSameNativeContext(configForTest)) {
-            _labTestOutput.value = "Context-Parameter geändert. Bitte das Modell im Bereich Modell erneut laden, bevor ein Prompt-Test startet."
+        val originalReady = _modelState.value as? ModelLifecycleState.Ready ?: return
+        val originalConfig = _config.value
+        if (!originalReady.loadedConfig.hasSameNativeContext(originalConfig)) {
+            _labTestOutput.value = "Context-Parameter geändert. Bitte das Modell im Bereich Modell erneut laden, bevor ein Vergleich startet."
             return
         }
 
         launchEngineOperation {
             _labActiveTest.value = testCase
-            _labTestOutput.value = "Testlauf gestartet..."
+            _labTestOutput.value = "Automatischer Profilvergleich gestartet: 3 Parameterprofile × 1 Test."
             _labMetrics.value = null
+            lastWorkflowBackendReport = ""
 
-            val timeoutSeconds = if (testCase.id == "TEST_1_OK") {
-                configForTest.timeoutShortTestSec
-            } else {
-                testCase.timeoutSec
-            }
-            val outcomes = mutableListOf<Triple<Int, String, com.example.engine.PromptValidationResult>>()
-            var stopReason: String? = null
+            val variants = PromptTestCatalog.PARAMETER_VARIANTS
+            val summaries = mutableListOf<String>()
+            val backendEvidence = StringBuilder()
+            var currentReady: ModelLifecycleState.Ready? = originalReady
 
-            for (repetition in 1..testCase.repetitionCount) {
-                if (nativeBridge.isAbortRequested()) {
-                    stopReason = "Testlauf durch Nutzer abgebrochen."
+            for ((index, variant) in variants.withIndex()) {
+                if (nativeEngineUnresponsive.get()) {
+                    summaries += "Weitere Profile gestoppt: native Engine hat den Abbruch nicht quittiert. App-Neustart erforderlich."
                     break
                 }
+
+                val configForTest = variant.toConfig(originalConfig, testCase.maxTokens)
+                _config.value = configForTest
+
+                val readyForVariant = currentReady
+                    ?.takeIf { it.loadedConfig.hasSameNativeContext(configForTest) }
+                    ?: reloadCachedModelForTest(originalReady, configForTest)
+
+                if (readyForVariant == null) {
+                    val error = (_modelState.value as? ModelLifecycleState.Error)?.errorMessage
+                        ?: "Modellinitialisierung für dieses Profil fehlgeschlagen."
+                    val failedMetrics = NativeMetrics(
+                        promptTokens = 0,
+                        generatedTokens = 0,
+                        promptEvalDurationMs = 0,
+                        generationDurationMs = 0,
+                        totalDurationMs = 0,
+                        decodeCalls = 0,
+                        tokensPerSecond = 0f,
+                        finishReason = "NATIVE_ERROR",
+                        errorMessage = error
+                    )
+                    persistWorkflowRun(
+                        testCase, variant, configForTest, failedMetrics, "",
+                        nativeBridge.getActiveBackendName(), false, error
+                    )
+                    backendEvidence.appendLine("Profil ${index + 1}/3 – ${variant.id}: MODELLLADEN FEHLGESCHLAGEN")
+                    backendEvidence.appendLine(error)
+                    backendEvidence.appendLine(nativeBridge.getModelLoadLog())
+                    backendEvidence.appendLine()
+                    summaries += "Profil ${index + 1}/3 – ${variant.label}: FEHLGESCHLAGEN – $error"
+                    currentReady = null
+                    continue
+                }
+
+                currentReady = readyForVariant
+                _modelState.value = readyForVariant
+
+                // This is the exact native llama.cpp model-load log for this profile,
+                // not merely the selected backend label.
+                val loadLog = nativeBridge.getModelLoadLog()
+                val offloadLines = loadLog.lineSequence()
+                    .filter { line ->
+                        line.contains("offloaded", ignoreCase = true) ||
+                            line.contains("layers to GPU", ignoreCase = true) ||
+                            line.contains("Vulkan", ignoreCase = true) ||
+                            line.contains("model buffer", ignoreCase = true) ||
+                            line.contains("compute buffer", ignoreCase = true)
+                    }
+                    .toList().takeLast(16)
+                    .joinToString("\n")
+                backendEvidence.appendLine("Profil ${index + 1}/3 – ${variant.id}: backend=${readyForVariant.activeBackendName}")
+                backendEvidence.appendLine(
+                    offloadLines.ifBlank { "Kein expliziter GPU-Layer-Offload-Eintrag im llama.cpp-Lade-Log gefunden." }
+                )
+                backendEvidence.appendLine()
 
                 val localStream = StringBuilder()
                 val callback = object : InferenceCallback {
                     override fun onToken(tokenText: String, tokenIndex: Int) {
                         localStream.append(tokenText)
-                        val prefix = if (testCase.repetitionCount > 1) {
-                            "Wiederholung ${repetition} / ${testCase.repetitionCount}\n"
-                        } else ""
-                        _labTestOutput.value = prefix + localStream.toString()
+                        _labTestOutput.value = "Profil ${index + 1}/3 – ${variant.label}\n" + localStream.toString()
                     }
 
                     override fun onProgress(progressPercent: Float, step: Int) {
-                        val prefix = if (testCase.repetitionCount > 1) {
-                            "Wiederholung ${repetition} / ${testCase.repetitionCount}\n"
-                        } else ""
-                        _labTestOutput.value = prefix +
-                            "Prompt-Evaluierung: ${progressPercent.toInt()}% (nativer Decode-Aufruf ${step})"
+                        _labTestOutput.value =
+                            "Profil ${index + 1}/3 – ${variant.label}\nPrompt-Prefill: ${progressPercent.toInt()}% · Decode-Aufruf $step"
                     }
                 }
 
@@ -735,7 +930,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     prompt = testCase.prompt,
                     config = configForTest,
                     callback = callback,
-                    timeoutSeconds = timeoutSeconds
+                    timeoutSeconds = testCase.timeoutSec
                 )
                 _labMetrics.value = metrics
 
@@ -744,101 +939,65 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     (metrics.finishReason == "STOP_TOKEN" || metrics.finishReason == "MAX_TOKENS") &&
                         metrics.generatedTokens > 0
                 val validation = PromptResultValidator.validate(testCase, response)
-                outcomes.add(Triple(repetition, response, validation))
-                val runSucceeded = inferenceCompleted && validation.passed
-                val runError = PromptResultValidator.failureReason(metrics.errorMessage, inferenceCompleted, validation)
+                val succeeded = inferenceCompleted && validation.passed
+                val error = PromptResultValidator.failureReason(metrics.errorMessage, inferenceCompleted, validation)
+                val actualBackend = nativeBridge.getActiveBackendName()
 
-                dao.insertRun(TestRunEntity(
-                    testCategory = testCase.id,
-                    testTitle = if (testCase.repetitionCount > 1) {
-                        "${testCase.title} (#$repetition)"
-                    } else testCase.title,
-                    promptText = testCase.prompt,
-                    responseText = response,
-                    promptTokens = metrics.promptTokens,
-                    generatedTokens = metrics.generatedTokens,
-                    promptEvalDurationMs = metrics.promptEvalDurationMs,
-                    generationDurationMs = metrics.generationDurationMs,
-                    tokensPerSecond = metrics.tokensPerSecond,
-                    totalDurationMs = metrics.totalDurationMs,
-                    nCtx = configForTest.nCtx,
-                    nBatch = configForTest.nBatch,
-                    nUbatch = configForTest.nUbatch,
-                    nThreads = configForTest.nThreads,
-                    nThreadsBatch = configForTest.nThreadsBatch,
-                    backendPreference = configForTest.backendPreference.name,
-                    activeBackend = readyState.activeBackendName,
-                    temperature = configForTest.temperature,
-                    topK = configForTest.topK,
-                    topP = configForTest.topP,
-                    maxTokens = configForTest.maxTokens,
-                    appCpuUsagePercent = _telemetry.value.appCpuUsagePercent,
-                    finishReason = metrics.finishReason,
-                    isSuccess = runSucceeded,
-                    errorMessage = runError,
-                    modelName = readyState.fileName,
-                    promptTokenizeDurationMs = metrics.promptTokenizeDurationMs,
-                    firstTokenDurationMs = metrics.firstTokenDurationMs,
-                    promptDecodeCalls = metrics.promptDecodeCalls,
-                    generationDecodeCalls = metrics.generationDecodeCalls
-                ))
+                persistWorkflowRun(
+                    testCase, variant, configForTest, metrics, response,
+                    actualBackend, succeeded, error
+                )
 
-                if (!inferenceCompleted) {
-                    stopReason = "Inferenz nicht erfolgreich: ${metrics.finishReason}. ${metrics.errorMessage.orEmpty()}"
-                    if (metrics.finishReason == "NATIVE_ERROR") {
-                        nativeBridge.unloadModel()
-                        _modelState.value = ModelLifecycleState.Error(
-                            metrics.errorMessage ?: "Native Engine-Fehler"
-                        )
-                    } else if (!nativeEngineUnresponsive.get()) {
-                        _modelState.value = readyState
-                    }
+                summaries += "Profil ${index + 1}/3 – ${variant.label}: ${if (succeeded) "BESTANDEN" else "FEHLGESCHLAGEN"} · ${metrics.finishReason}\n" +
+                    "First Token ${metrics.firstTokenDurationMs} ms · Prefill ${metrics.promptEvalDurationMs} ms / ${metrics.promptTokens} Tokens · " +
+                    "Generierung ${metrics.generationDurationMs} ms / ${metrics.generatedTokens} Tokens · ${"%.2f".format(metrics.tokensPerSecond)} Tok/s\n" +
+                    "Backend: $actualBackend · Prompt-Decode: ${metrics.promptDecodeCalls} · Generation-Decode: ${metrics.generationDecodeCalls}\n" +
+                    "Inhalt: ${validation.details}" +
+                    (error?.let { "\nFehler: $it" } ?: "")
+
+                // Vulkan has no reliable native abort callback in this pinned llama.cpp build.
+                // If it fails to acknowledge cancellation, don't touch the engine again.
+                if (nativeEngineUnresponsive.get()) {
+                    summaries += "Weitere Profile gestoppt: native Engine reagiert nicht auf Abbruchsignale. Bitte App neu starten."
                     break
                 }
-
-                // Inhaltliche Abweichungen im 10x-Test protokollieren, aber alle
-                // zehn realen Modellläufe ausführen, um Varianz sichtbar zu machen.
-                if (!validation.passed && testCase.repetitionCount == 1) break
-            }
-
-            if (outcomes.isNotEmpty()) {
-                if (testCase.repetitionCount > 1) {
-                    val passedCount = outcomes.count { it.third.passed }
-                    val distinctAnswers = outcomes.map { it.second.trim() }.distinct().size
-                    val details = outcomes.joinToString("\n\n") { (number, response, validation) ->
-                        val resultLabel = if (validation.passed) "BESTANDEN" else "FEHLGESCHLAGEN"
-                        "Durchlauf #$number [$resultLabel]: ${validation.details}\nAntwort: $response"
-                    }
-                    val earlyStop = if (outcomes.size < testCase.repetitionCount) {
-                        "\n\nVorzeitig beendet nach ${outcomes.size}/${testCase.repetitionCount} Durchläufen."
-                    } else ""
-                    _labTestOutput.value =
-                        "10er-Wiederholung: $passedCount/${outcomes.size} inhaltlich korrekt\n" +
-                            "Unterschiedliche Antworten: $distinctAnswers$earlyStop\n\n$details"
-                } else {
-                    val outcome = outcomes.last()
-                    val label = if (outcome.third.passed) "BESTANDEN" else "FEHLGESCHLAGEN"
-                    _labTestOutput.value =
-                        "Inhaltstest: $label\n${outcome.third.details}\n\nModellantwort:\n${outcome.second}"
+                if (metrics.finishReason == "ABORTED_BY_USER") {
+                    summaries += "Weitere Profile wurden nach dem manuellen Abbruch nicht gestartet."
+                    break
                 }
-            } else if (stopReason != null) {
-                _labTestOutput.value = stopReason
             }
 
-            if (stopReason != null && _labTestOutput.value.isNotBlank()) {
-                _labTestOutput.value += "\n\n$stopReason"
+            lastWorkflowBackendReport = backendEvidence.toString().take(16384)
+            _labTestOutput.value = summaries.joinToString("\n\n").ifBlank { "Kein Testprofil ausgeführt." }
+
+            // Restore the exact user-selected context/backend after the comparison.
+            _config.value = originalConfig
+            if (!nativeEngineUnresponsive.get()) {
+                val restoredReady = currentReady
+                    ?.takeIf { it.loadedConfig.hasSameNativeContext(originalConfig) }
+                    ?: reloadCachedModelForTest(originalReady, originalConfig)
+                if (restoredReady != null) {
+                    _modelState.value = restoredReady
+                    _labTestOutput.value += "\n\nUrsprüngliches Modellprofil wurde wiederhergestellt."
+                } else {
+                    val restoreError = (_modelState.value as? ModelLifecycleState.Error)?.errorMessage
+                        ?: "Das ursprüngliche Modellprofil konnte nicht wiederhergestellt werden."
+                    _modelState.value = ModelLifecycleState.Error(restoreError)
+                    _labTestOutput.value += "\n\nWiederherstellung fehlgeschlagen: $restoreError"
+                }
+            } else {
+                _modelState.value = ModelLifecycleState.Error(
+                    "Die native Engine reagiert nicht mehr auf Abbruchsignale. Bitte LLM Lab neu starten."
+                )
             }
 
             _labActiveTest.value = null
-            if (!nativeEngineUnresponsive.get() && _modelState.value !is ModelLifecycleState.Error) {
-                _modelState.value = readyState
-            }
         }
     }
 
     // ----------------- STRESSTEST & BENCHMARK -----------------
 
-    fun run20xBenchmark() {
+    fun run3xBenchmark() {
         val readyState = _modelState.value as? ModelLifecycleState.Ready ?: return
         val config = _config.value
         if (!readyState.loadedConfig.hasSameNativeContext(config)) {
@@ -857,13 +1016,13 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             var tpsSum = 0f
 
             _benchmarkSummary.value = BenchmarkSummary(
-                totalRuns = 20,
+                totalRuns = 3,
                 isRunning = true,
                 currentIteration = 0
             )
 
             var stopReason: String? = null
-            for (iteration in 1..20) {
+            for (iteration in 1..3) {
                 if (nativeBridge.isAbortRequested()) {
                     stopReason = "Durch Nutzer abgebrochen."
                     break
@@ -898,7 +1057,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
 
                 dao.insertRun(TestRunEntity(
                     testCategory = "BENCHMARK_STRESS",
-                    testTitle = "Stresstest Durchlauf #$iteration / 20",
+                    testTitle = "Stabilitätstest Durchlauf #$iteration / 3",
                     promptText = prompt,
                     responseText = collectedText.toString(),
                     promptTokens = metrics.promptTokens,
@@ -1025,9 +1184,9 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     else -> "NOT_LOADED"
                 }
                 report = if (asJson) {
-                    ExportManager.generateJson(context, runs, _config.value, _telemetry.value, engineVer, modelName, modelSize, modelInfo, modelStatus, _availableBackends.value, nativeBridge.getActiveBackendName())
+                    ExportManager.generateJson(context, runs, _config.value, _telemetry.value, engineVer, modelName, modelSize, modelInfo, modelStatus, _availableBackends.value, nativeBridge.getActiveBackendName(), nativeBridge.getModelLoadLog(), lastWorkflowBackendReport)
                 } else {
-                    ExportManager.generateTxt(context, runs, _config.value, _telemetry.value, engineVer, modelName, modelSize, modelInfo, modelStatus, _availableBackends.value, nativeBridge.getActiveBackendName())
+                    ExportManager.generateTxt(context, runs, _config.value, _telemetry.value, engineVer, modelName, modelSize, modelInfo, modelStatus, _availableBackends.value, nativeBridge.getActiveBackendName(), nativeBridge.getModelLoadLog(), lastWorkflowBackendReport)
                 }
 
                 val savedPath = ExportManager.saveExportToDownloads(context, report!!, fileName, mimeType)

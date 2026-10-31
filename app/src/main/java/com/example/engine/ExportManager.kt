@@ -27,7 +27,9 @@ object ExportManager {
         modelInfo: GgufInfo? = null,
         modelStatus: String = "UNKNOWN",
         backendInfo: List<NativeBackendInfo> = emptyList(),
-        activeBackendName: String = "Nicht verfügbar"
+        activeBackendName: String = "Nicht verfügbar",
+        modelLoadLog: String = "",
+        workflowBackendReport: String = ""
     ): String {
         val root = JSONObject()
         val nowStr = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.GERMANY).format(Date())
@@ -43,6 +45,8 @@ object ExportManager {
         root.put("buildCommit", BuildConfig.GIT_COMMIT)
         root.put("modelStatus", modelStatus)
         root.put("activeBackendSelection", activeBackendName)
+        root.put("nativeModelLoadLog", modelLoadLog.take(65536))
+        root.put("workflowBackendOffloadEvidence", workflowBackendReport.take(16384))
         val backendArray = JSONArray()
         backendInfo.forEach { backend ->
             backendArray.put(JSONObject().apply {
@@ -107,11 +111,19 @@ object ExportManager {
         for (r in runs) {
             val obj = JSONObject()
             obj.put("id", r.id)
+            obj.put("nCtx", r.nCtx)
+            obj.put("nBatch", r.nBatch)
+            obj.put("nUbatch", r.nUbatch)
+            obj.put("nThreads", r.nThreads)
             obj.put("timestamp", SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.GERMANY).format(Date(r.timestamp)))
             obj.put("category", r.testCategory)
             obj.put("title", r.testTitle)
             obj.put("promptLength", r.promptText.length)
-            obj.put("responseSample", r.responseText.take(200))
+            obj.put("promptText", if (r.testCategory == "CHAT") "[CHAT_PROMPT_REDACTED]" else r.promptText.take(2000))
+            obj.put("responseText", if (r.testCategory == "CHAT") "[CHAT_RESPONSE_REDACTED]" else r.responseText.take(4000))
+            obj.put("modelName", r.modelName)
+            obj.put("javaHeapBytes", r.javaHeapBytes)
+            obj.put("nativeHeapBytes", r.nativeHeapBytes)
             obj.put("promptTokens", r.promptTokens)
             obj.put("generatedTokens", r.generatedTokens)
             obj.put("promptTokenizeDurationMs", r.promptTokenizeDurationMs)
@@ -169,6 +181,7 @@ object ExportManager {
         sb.appendLine("Build-Commit         : ${BuildConfig.GIT_COMMIT}")
         sb.appendLine("Modellstatus         : $modelStatus")
         sb.appendLine("Backend-Auswahl      : $activeBackendName")
+        sb.appendLine("GPU-Offload-Nachweis : siehe nativen Modelllade-Log; Backendname allein beweist keinen Layer-Offload.")
         sb.appendLine("Backend-Registry     : ${backendInfo.joinToString { "${it.registryName}=${if (it.available) "available" else "unavailable"}" }.ifBlank { "nicht verfügbar" }}")
         sb.appendLine("Android-Version      : Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
         sb.appendLine("Gerät / Hardware     : ${Build.MANUFACTURER} ${Build.MODEL} (${telemetry.cpuArch}, ${telemetry.cpuCores} Kerne)")
@@ -218,6 +231,8 @@ object ExportManager {
                 sb.appendLine("  Prompt Decode     : ${r.promptDecodeCalls} Aufrufe")
                 sb.appendLine("  Generation Decode : ${r.generationDecodeCalls} Aufrufe")
                 sb.appendLine("  Threads Batch     : ${r.nThreadsBatch}")
+                sb.appendLine("  Native-Kontext    : n_ctx=${r.nCtx}, n_batch=${r.nBatch}, n_ubatch=${r.nUbatch}")
+                sb.appendLine("  CPU-Threads       : Generation=${r.nThreads}, Prefill=${r.nThreadsBatch}")
                 sb.appendLine("  Backend           : ${r.activeBackend} (Policy: ${r.backendPreference})")
                 sb.appendLine("  Sampling          : temp=${r.temperature}, topK=${r.topK}, topP=${r.topP}, maxTokens=${r.maxTokens}")
                 sb.appendLine("  App-CPU-Anteil    : ${r.appCpuUsagePercent?.let { "${"%.1f".format(it)}% (prozessbezogen)" } ?: "nicht verfügbar"}")
@@ -228,11 +243,24 @@ object ExportManager {
                 if (r.errorMessage != null) {
                     sb.appendLine("  Fehler            : ${r.errorMessage}")
                 }
-                sb.appendLine("  Antwort-Auszug    : ${r.responseText.take(120).replace("\n", " ")}")
+                if (r.testCategory != "CHAT") sb.appendLine("  Test-Prompt       : ${r.promptText.take(1000).replace("\n", " ")}")
+                sb.appendLine("  Modell            : ${r.modelName}")
+                sb.appendLine("  Java-/Native-Heap : ${r.javaHeapBytes} / ${r.nativeHeapBytes} Bytes")
+                sb.appendLine("  Antwort           : ${if (r.testCategory == "CHAT") "[CHAT_RESPONSE_REDACTED]" else r.responseText.take(4000).replace("\n", " ")}")
                 sb.appendLine("--------------------------------------------------------------------------------")
             }
         }
         sb.appendLine("================================================================================")
+        if (workflowBackendReport.isNotBlank()) {
+            sb.appendLine("AUTOMATISCHE PROFILVERGLEICHE – GPU-OFFLOAD-NACHWEIS:")
+            sb.appendLine(workflowBackendReport.take(16384))
+            sb.appendLine("--------------------------------------------------------------------------------")
+        }
+        if (modelLoadLog.isNotBlank()) {
+            sb.appendLine("NATIVER MODELL-LADELOG (llama.cpp):")
+            sb.appendLine(modelLoadLog.take(65536))
+            sb.appendLine("--------------------------------------------------------------------------------")
+        }
         sb.appendLine("ENDE DES DIAGNOSEBERICHTS")
         return sb.toString()
     }

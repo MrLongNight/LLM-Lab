@@ -56,6 +56,12 @@ class LlamaNativeBridge(private val nativeLibraryDir: String?) {
             .getOrDefault("Nicht verfügbar")
     }
 
+    /** Captured llama.cpp model/context load log, including any GPU layer-offload report. */
+    fun getModelLoadLog(): String {
+        if (!isNativeLibraryLoaded || engineHandle == 0L) return ""
+        return runCatching { nativeGetModelLoadLog(engineHandle) }.getOrDefault("")
+    }
+
     fun getEngineVersion(): String {
         if (!isNativeLibraryLoaded || engineHandle == 0L) {
             return "Nicht verfügbar: native llama.cpp Bibliothek wurde nicht geladen"
@@ -205,6 +211,7 @@ class LlamaNativeBridge(private val nativeLibraryDir: String?) {
 
     private external fun nativeGetBackendReport(): String
     private external fun nativeGetActiveBackendName(handle: Long): String
+    private external fun nativeGetModelLoadLog(handle: Long): String
     private external fun nativeGetVersion(): String
     private external fun nativeCreateEngine(nativeLibraryDir: String): Long
     private external fun nativeDestroyEngine(handle: Long)

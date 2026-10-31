@@ -1,7 +1,6 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -9,12 +8,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
@@ -46,7 +45,6 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
             .background(DarkBackground)
             .padding(16.dp)
     ) {
-        // Header
         Text(
             text = "PROMPT-TESTLABOR",
             color = NeonCyan,
@@ -55,29 +53,55 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
             letterSpacing = 1.5.sp
         )
         Text(
-            text = "8 Standardisierte Testfälle",
+            text = "3 automatische Testabläufe",
             color = TextPrimary,
             fontSize = 20.sp,
             fontWeight = FontWeight.Bold
         )
         Text(
-            text = "Vergleiche native Evaluierungs- und Generierungsleistung für Dokumenten-Workflows.",
+            text = "Jeder Ablauf wird mit drei nativen Profilen verglichen. Alle Messwerte und Antworten werden getrennt gespeichert.",
             color = TextSecondary,
             fontSize = 12.sp
         )
 
-        if (contextReloadRequired) {
-            Text("Context-Parameter geändert. Bitte das Modell im Bereich Modell erneut laden, bevor Prompt-Tests gestartet werden.", color = ElectricAmber, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(modifier = Modifier.height(8.dp))
+        Surface(
+            color = DarkSurfaceVariant,
+            shape = RoundedCornerShape(6.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("VERGLEICHSPROFILE", color = NeonCyan, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                PromptTestCatalog.PARAMETER_VARIANTS.forEachIndexed { index, variant ->
+                    Text(
+                        text = "${index + 1}. ${variant.label}",
+                        color = TextSecondary,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+                Text(
+                    text = "Vulkan läuft zuletzt. In dieser llama.cpp-Version ist GPU-Abbruch nicht zuverlässig garantiert.",
+                    color = ElectricAmber,
+                    fontSize = 10.sp
+                )
+            }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        if (contextReloadRequired) {
+            Text(
+                text = "Context-Parameter geändert. Bitte das Modell erneut laden, bevor ein Vergleich startet.",
+                color = ElectricAmber,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
 
-        // Live Ausführungsfenster (wenn Test aktiv oder Ausgabe vorhanden)
+        Spacer(modifier = Modifier.height(10.dp))
+
         if (testOutput.isNotEmpty() || isRunning) {
             Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 12.dp),
+                modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
                 colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant),
                 border = androidx.compose.foundation.BorderStroke(1.dp, if (isRunning) NeonCyan else DarkCardBorder)
             ) {
@@ -88,17 +112,11 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = if (isRunning) "Test läuft: ${activeTest?.title}" else "Letztes Testergebnis",
-                            color = when {
-                                isRunning -> NeonCyan
-                                testOutput.contains("FEHLGESCHLAGEN") -> LaserCrimson
-                                testOutput.contains("BESTANDEN") -> MatrixGreen
-                                else -> TextSecondary
-                            },
+                            text = if (isRunning) "Vergleich läuft: ${activeTest?.title}" else "Letztes Vergleichsergebnis",
+                            color = if (isRunning) NeonCyan else TextPrimary,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold
                         )
-
                         if (isRunning) {
                             Button(
                                 onClick = { viewModel.requestAbort() },
@@ -106,13 +124,14 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                 modifier = Modifier.height(28.dp).testTag("abort_lab_test_button")
                             ) {
+                                Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
                                 Text("Abbrechen", fontSize = 11.sp)
                             }
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(8.dp))
-
+                    Spacer(Modifier.height(8.dp))
                     Surface(
                         color = CodeBackground,
                         shape = RoundedCornerShape(6.dp),
@@ -121,7 +140,7 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
                         Text(
                             text = testOutput,
                             color = TextPrimary,
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace,
                             modifier = Modifier
                                 .padding(10.dp)
@@ -130,21 +149,20 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
                         )
                     }
 
-                    // Metrikzeile
-                    labMetrics?.let { m ->
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("Tokenisierung: ${m.promptTokenizeDurationMs} ms | Prompt-Eval: ${m.promptEvalDurationMs} ms (${m.promptTokens} Tokens)", color = TextSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                            Text("First Token: ${m.firstTokenDurationMs} ms | Generierung: ${m.generationDurationMs} ms (${m.generatedTokens} Tokens)", color = TextSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                            Text("Decode Calls: Prompt ${m.promptDecodeCalls} | Generation ${m.generationDecodeCalls} | ${"%.1f".format(m.tokensPerSecond)} Tok/s", color = NeonCyan, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
-                            Text("Status: ${m.finishReason}", color = if (m.finishReason == "STOP_TOKEN" || m.finishReason == "MAX_TOKENS") MatrixGreen else LaserCrimson, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                        }
+                    labMetrics?.let { metrics ->
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "Zuletzt: First Token ${metrics.firstTokenDurationMs} ms · Prefill ${metrics.promptEvalDurationMs} ms · " +
+                                "${metrics.generatedTokens} Tokens · ${"%.2f".format(metrics.tokensPerSecond)} Tok/s · ${metrics.finishReason}",
+                            color = NeonCyan,
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
                     }
                 }
             }
         }
 
-        // Testfall-Liste
         LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
@@ -153,7 +171,7 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             items(PromptTestCatalog.ALL_TESTS, key = { it.id }) { testCase ->
-                PromptTestCaseCard(
+                PromptWorkflowCard(
                     testCase = testCase,
                     isModelReady = isModelReady,
                     isThisRunning = activeTest?.id == testCase.id,
@@ -166,7 +184,7 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
 }
 
 @Composable
-fun PromptTestCaseCard(
+private fun PromptWorkflowCard(
     testCase: PromptTestCase,
     isModelReady: Boolean,
     isThisRunning: Boolean,
@@ -182,68 +200,24 @@ fun PromptTestCaseCard(
             modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = testCase.title,
-                    color = TextPrimary,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f)
-                )
-
-                if (testCase.repetitionCount > 1) {
-                    Surface(
-                        color = DarkSurfaceVariant,
-                        shape = RoundedCornerShape(4.dp),
-                        modifier = Modifier.padding(start = 6.dp)
-                    ) {
-                        Text(
-                            text = "${testCase.repetitionCount}x Loop",
-                            color = ElectricAmber,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
-                }
-            }
-
             Text(
-                text = testCase.description,
-                color = TextSecondary,
-                fontSize = 12.sp
+                text = testCase.title,
+                color = TextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
             )
-
-            Surface(
-                color = CodeBackground,
-                shape = RoundedCornerShape(4.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = "Prompt: ${testCase.prompt.take(100)}${if (testCase.prompt.length > 100) "..." else ""}",
-                    color = TextSecondary,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.padding(8.dp)
-                )
-            }
-
+            Text(text = testCase.description, color = TextSecondary, fontSize = 12.sp)
+            Text(
+                text = "3 Konfigurationen · bis zu ${testCase.timeoutSec}s je Lauf · max. ${testCase.maxTokens} Tokens",
+                color = TextMuted,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace
+            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Timeout: ${testCase.timeoutSec}s",
-                    color = TextMuted,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace
-                )
-
                 Button(
                     onClick = onExecute,
                     enabled = isModelReady && !isAnyRunning,
@@ -256,13 +230,17 @@ fun PromptTestCaseCard(
                     modifier = Modifier.testTag("run_test_${testCase.id}")
                 ) {
                     if (isThisRunning) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.Black, strokeWidth = 2.dp)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Läuft...", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = Color.Black,
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Vergleich läuft...", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     } else {
-                        Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Test starten", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("3 Profile testen", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }

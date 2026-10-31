@@ -50,7 +50,7 @@ fun BenchmarkScreen(viewModel: LLMLabViewModel) {
                 letterSpacing = 1.5.sp
             )
             Text(
-                text = "20x Dauerlast-Testlauf",
+                text = "3x Stabilitätscheck",
                 color = TextPrimary,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold
@@ -79,7 +79,7 @@ fun BenchmarkScreen(viewModel: LLMLabViewModel) {
                 ) {
                     Column {
                         Text(
-                            text = if (bench.isRunning) "Testlauf läuft: Iteration ${bench.currentIteration} / 20" else "Stresstest bereit",
+                            text = if (bench.isRunning) "Testlauf läuft: Iteration ${bench.currentIteration} / 3" else "Stresstest bereit",
                             color = if (bench.isRunning) NeonCyan else TextPrimary,
                             fontWeight = FontWeight.Bold,
                             fontSize = 16.sp
@@ -107,7 +107,7 @@ fun BenchmarkScreen(viewModel: LLMLabViewModel) {
                         }
                     } else {
                         Button(
-                            onClick = { viewModel.run20xBenchmark() },
+                            onClick = { viewModel.run3xBenchmark() },
                             enabled = isModelReady && !contextReloadRequired,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = NeonCyan,
@@ -119,7 +119,7 @@ fun BenchmarkScreen(viewModel: LLMLabViewModel) {
                         ) {
                             Icon(imageVector = Icons.Default.Speed, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("20x Test starten", fontWeight = FontWeight.Bold)
+                            Text("3x Test starten", fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -127,7 +127,7 @@ fun BenchmarkScreen(viewModel: LLMLabViewModel) {
                 // Fortschrittsbalken
                 if (bench.isRunning) {
                     LinearProgressIndicator(
-                        progress = { bench.currentIteration / 20f },
+                        progress = { bench.currentIteration / 3f },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(8.dp)
