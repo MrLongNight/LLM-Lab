@@ -427,7 +427,7 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
     std::vector<llama_token> recentTokens;
     const size_t repeatWindow = 64;
     const size_t initialRecent = std::min(repeatWindow, promptTokens.size());
-    recentTokens.insert(promptTokens.end() - static_cast<std::ptrdiff_t>(initialRecent), promptTokens.end());
+    recentTokens.insert(recentTokens.end(), promptTokens.end() - static_cast<std::ptrdiff_t>(initialRecent), promptTokens.end());
     std::vector<char> pieceBuffer(256);
 
     LOGI("Sampler: temperature=%.2f top_k=40 top_p=0.90 repeat_penalty=1.08", config.temperature);
