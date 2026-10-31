@@ -514,6 +514,15 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
+        val currentConfig = _config.value
+        if (!readyState.loadedConfig.hasSameNativeContext(currentConfig)) {
+            _chatMessages.value = _chatMessages.value + ChatMessage(
+                isUser = false,
+                text = "Context-Parameter geändert. Bitte im Bereich Modell Erneut laden auswählen, bevor eine neue Inferenz startet."
+            )
+            return
+        }
+
         val userMsg = ChatMessage(isUser = true, text = promptText)
         val assistantPlaceholderId = java.util.UUID.randomUUID().toString()
         val assistantPlaceholder = ChatMessage(
@@ -523,15 +532,6 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             isStreaming = true
         )
         _chatMessages.value = _chatMessages.value + userMsg + assistantPlaceholder
-
-        val currentConfig = _config.value
-        if (!readyState.loadedConfig.hasSameNativeContext(currentConfig)) {
-            _chatMessages.value = _chatMessages.value + ChatMessage(
-                isUser = false,
-                text = "Context-Parameter geändert. Bitte im Bereich Modell Erneut laden auswählen, bevor eine neue Inferenz startet."
-            )
-            return
-        }
         launchEngineOperation {
             var streamedResponse = StringBuilder()
             var tokenCounter = 0

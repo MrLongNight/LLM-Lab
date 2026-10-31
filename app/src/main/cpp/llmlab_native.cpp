@@ -316,7 +316,8 @@ void NativeLlamaEngine::resetAbort() {
 std::string NativeLlamaEngine::getActiveBackendName() const {
     std::lock_guard<std::mutex> lock(engine_mutex);
     if (!is_model_loaded.load()) return "Kein Modell geladen";
-    if (active_gpu_layers_requested > 0) {
+    // llama.cpp uses -1 to request offloading every layer, not zero layers.
+    if (active_gpu_layers_requested != 0) {
         return active_backend_name + " (experimenteller Offload; Abbruch nicht garantiert; Layerzahl siehe llama.cpp-Load-Log)";
     }
     return "CPU";

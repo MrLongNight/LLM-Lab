@@ -41,7 +41,7 @@ endif()
 # Android's CMake toolchain restricts package lookup to the Android sysroot.
 # SPIRV-Headers is a host-only, header-only dependency used while compiling
 # ggml-vulkan. Resolve Debian/Ubuntu's host package explicitly for cross builds.
-if(ANDROID AND NOT DEFINED SPIRV-Headers_DIR)
+if(ANDROID AND (NOT DEFINED SPIRV-Headers_DIR OR "${SPIRV-Headers_DIR}" MATCHES "-NOTFOUND$"))
     find_file(LLMLAB_SPIRV_HEADERS_CONFIG
         NAMES SPIRV-HeadersConfig.cmake
         PATHS
@@ -59,7 +59,7 @@ if(ANDROID AND NOT DEFINED SPIRV-Headers_DIR)
         set(
             SPIRV-Headers_DIR
             "${LLMLAB_SPIRV_HEADERS_CONFIG_DIR}"
-            CACHE PATH "Host SPIRV-Headers CMake package directory"
+            CACHE PATH "Host SPIRV-Headers CMake package directory" FORCE
         )
     endif()
 endif()

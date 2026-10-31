@@ -7,13 +7,16 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.data.AppDatabase
 import com.example.data.TestRunEntity
 import com.example.engine.GgufMetadataParser
+import com.example.engine.GgufInfo
 import com.example.engine.InferenceConfig
 import com.example.engine.InferenceCallback
 import com.example.engine.LlamaNativeBridge
 import com.example.engine.ProfilePreset
 import com.example.engine.PromptTestCatalog
 import com.example.ui.LLMLabViewModel
+import com.example.ui.ModelLifecycleState
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -189,5 +192,39 @@ class ExampleRobolectricTest {
             assertNotNull(activity.window)
         }
         scenario.close()
+    }
+    @Test
+    fun `chat context mismatch does not leave a streaming placeholder`() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val viewModel = LLMLabViewModel(app)
+        val currentConfig = viewModel.config.value
+
+        val modelStateField = LLMLabViewModel::class.java.getDeclaredField("_modelState")
+        modelStateField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val modelState = modelStateField.get(viewModel) as MutableStateFlow<ModelLifecycleState>
+        modelState.value = ModelLifecycleState.Ready(
+            fileName = "test.gguf",
+            fileSizeBytes = 1L,
+            ggufInfo = GgufInfo(
+                isValid = true,
+                magic = "GGUF",
+                version = 3,
+                tensorCount = 0,
+                kvCount = 0
+            ),
+            initDurationMs = 1L,
+            engineVersion = "test",
+            loadedConfig = currentConfig.copy(nCtx = currentConfig.nCtx + 512),
+            activeBackendName = "CPU"
+        )
+
+        viewModel.sendChatMessage("Teste mit geänderten Context-Parametern")
+
+        val messages = viewModel.chatMessages.value
+        assertEquals(2, messages.size)
+        assertFalse(messages.any { it.isUser })
+        assertFalse(messages.any { it.isStreaming })
+        assertTrue(messages.last().text.contains("Context-Parameter geändert"))
     }
 }
