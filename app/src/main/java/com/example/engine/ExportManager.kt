@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import androidx.core.content.FileProvider
+import com.example.BuildConfig
 import com.example.data.TestRunEntity
 import org.json.JSONArray
 import org.json.JSONObject
@@ -22,13 +23,16 @@ object ExportManager {
         telemetry: SystemTelemetry,
         engineVersion: String,
         modelName: String,
-        modelSizeFormatted: String
+        modelSizeFormatted: String,
+        modelInfo: GgufInfo? = null,
+        modelStatus: String = "UNKNOWN"
     ): String {
         val root = JSONObject()
         val nowStr = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.GERMANY).format(Date())
 
         root.put("exportTimestamp", nowStr)
-        root.put("appVersion", "1.0-testbench")
+        root.put("appVersion", BuildConfig.VERSION_NAME)
+        root.put("modelStatus", modelStatus)
         root.put("androidVersion", "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
         root.put("deviceModel", "${Build.MANUFACTURER} ${Build.MODEL}")
         root.put("cpuArch", telemetry.cpuArch)
@@ -37,6 +41,17 @@ object ExportManager {
         root.put("engineVersion", engineVersion)
         root.put("modelName", modelName)
         root.put("modelSize", modelSizeFormatted)
+        val modelMetadata = JSONObject()
+        modelMetadata.put("available", modelInfo != null)
+        modelMetadata.put("ggufVersion", modelInfo?.version ?: JSONObject.NULL)
+        modelMetadata.put("tensorCount", modelInfo?.tensorCount ?: JSONObject.NULL)
+        modelMetadata.put("metadataEntryCount", modelInfo?.kvCount ?: JSONObject.NULL)
+        modelMetadata.put("architecture", modelInfo?.architecture ?: JSONObject.NULL)
+        modelMetadata.put("fileType", modelInfo?.fileTypeDescription ?: JSONObject.NULL)
+        modelMetadata.put("contextLength", modelInfo?.contextLength ?: JSONObject.NULL)
+        modelMetadata.put("embeddingLength", modelInfo?.embeddingLength ?: JSONObject.NULL)
+        modelMetadata.put("blockCount", modelInfo?.blockCount ?: JSONObject.NULL)
+        root.put("modelMetadata", modelMetadata)
 
         val params = JSONObject()
         params.put("profile", config.selectedProfile.name)
@@ -56,6 +71,7 @@ object ExportManager {
         memory.put("javaHeapUsedMb", telemetry.javaHeapUsedMb)
         memory.put("javaHeapMaxMb", telemetry.javaHeapMaxMb)
         memory.put("nativeHeapAllocatedMb", telemetry.nativeHeapAllocatedMb)
+        memory.put("nativeHeapScope", "Android native allocator heap; mmap-gemappte GGUF-Modellgewichte sind darin nicht zwingend vollständig enthalten.")
         memory.put("systemAvailableRamMb", telemetry.systemAvailableRamMb)
         memory.put("systemTotalRamMb", telemetry.systemTotalRamMb)
         root.put("systemTelemetry", memory)
@@ -105,12 +121,20 @@ object ExportManager {
         sb.appendLine("        LLM LAB - MOBILE INFERENCE TESTBENCH : DIAGNOSEBERICHT")
         sb.appendLine("================================================================================")
         sb.appendLine("Erstellungszeitpunkt : $nowStr")
-        sb.appendLine("App-Version          : 1.0 (Mobile Inference Testbench)")
+        sb.appendLine("App-Version          : ${BuildConfig.VERSION_NAME} (Mobile Inference Testbench)")
+        sb.appendLine("Modellstatus         : $modelStatus")
         sb.appendLine("Android-Version      : Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
         sb.appendLine("Gerät / Hardware     : ${Build.MANUFACTURER} ${Build.MODEL} (${telemetry.cpuArch}, ${telemetry.cpuCores} Kerne)")
         sb.appendLine("Thermal Status       : ${telemetry.thermalStatus}")
         sb.appendLine("Engine / Commit      : $engineVersion")
         sb.appendLine("GGUF Modell          : $modelName ($modelSizeFormatted)")
+        sb.appendLine("GGUF-Version         : ${modelInfo?.version ?: "nicht verfügbar"}")
+        sb.appendLine("Tensoren             : ${modelInfo?.tensorCount ?: "nicht verfügbar"}")
+        sb.appendLine("Metadaten-Einträge   : ${modelInfo?.kvCount ?: "nicht verfügbar"}")
+        sb.appendLine("Architektur          : ${modelInfo?.architecture ?: "nicht verfügbar"}")
+        sb.appendLine("Quantisierung        : ${modelInfo?.fileTypeDescription ?: "nicht verfügbar"}")
+        sb.appendLine("Context (Modelldaten): ${modelInfo?.contextLength ?: "nicht verfügbar"}")
+        sb.appendLine("Native-Heap-Hinweis  : mmap-gemappte GGUF-Gewichte sind darin nicht zwingend enthalten.")
         sb.appendLine("--------------------------------------------------------------------------------")
         sb.appendLine("INFERENZ-PARAMETER:")
         sb.appendLine("  Profil             : ${config.selectedProfile.label}")

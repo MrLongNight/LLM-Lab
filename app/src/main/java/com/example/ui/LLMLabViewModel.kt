@@ -914,31 +914,39 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             val runs = testRunHistory.value
             val engineVer = nativeBridge.getEngineVersion()
             val state = _modelState.value
-            val modelName = if (state is ModelLifecycleState.Ready) state.fileName else "qwen2.5-1.5b-instruct-q4_k_m.gguf"
-            val modelSize = if (state is ModelLifecycleState.Ready) "${state.fileSizeBytes / (1024 * 1024)} MB" else "~1.12 GB"
+            val selectedModel = when (state) {
+                is ModelLifecycleState.Ready -> Triple(state.fileName, state.fileSizeBytes, state.ggufInfo)
+                is ModelLifecycleState.ModelSelected -> Triple(state.fileName, state.fileSizeBytes, state.ggufInfo)
+                else -> lastModelSelection?.let { Triple(it.fileName, it.fileSizeBytes, it.ggufInfo) }
+            }
+            val modelName = selectedModel?.first ?: "Nicht geladen"
+            val modelSizeBytes = selectedModel?.second ?: 0L
+            val modelSize = if (modelSizeBytes > 0L) "${modelSizeBytes / (1024 * 1024)} MB" else "Nicht verfügbar"
+            val modelInfo = selectedModel?.third
+            val modelStatus = when (state) {
+                is ModelLifecycleState.Ready -> "READY"
+                is ModelLifecycleState.ModelSelected -> "SELECTED_NOT_LOADED"
+                is ModelLifecycleState.Initializing -> "INITIALIZING"
+                is ModelLifecycleState.InferenceRunning -> "INFERENCE_RUNNING"
+                ModelLifecycleState.Aborting -> "ABORTING"
+                is ModelLifecycleState.Error -> "ERROR"
+                else -> "NOT_LOADED"
+            }
 
             if (asJson) {
                 val json = ExportManager.generateJson(
-                    context = context,
-                    runs = runs,
-                    config = _config.value,
-                    telemetry = _telemetry.value,
-                    engineVersion = engineVer,
-                    modelName = modelName,
-                    modelSizeFormatted = modelSize
+                    context = context, runs = runs, config = _config.value, telemetry = _telemetry.value,
+                    engineVersion = engineVer, modelName = modelName, modelSizeFormatted = modelSize,
+                    modelInfo = modelInfo, modelStatus = modelStatus
                 )
                 withContext(Dispatchers.Main) {
                     ExportManager.shareExport(context, json, "llmlab_diagnose_${System.currentTimeMillis()}.json", "application/json")
                 }
             } else {
                 val txt = ExportManager.generateTxt(
-                    context = context,
-                    runs = runs,
-                    config = _config.value,
-                    telemetry = _telemetry.value,
-                    engineVersion = engineVer,
-                    modelName = modelName,
-                    modelSizeFormatted = modelSize
+                    context = context, runs = runs, config = _config.value, telemetry = _telemetry.value,
+                    engineVersion = engineVer, modelName = modelName, modelSizeFormatted = modelSize,
+                    modelInfo = modelInfo, modelStatus = modelStatus
                 )
                 withContext(Dispatchers.Main) {
                     ExportManager.shareExport(context, txt, "llmlab_diagnose_${System.currentTimeMillis()}.txt", "text/plain")
@@ -946,7 +954,6 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
     }
-
     fun clearHistory() {
         viewModelScope.launch(Dispatchers.IO) {
             dao.clearAll()

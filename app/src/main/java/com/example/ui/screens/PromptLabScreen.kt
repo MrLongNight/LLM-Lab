@@ -80,7 +80,12 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
                     ) {
                         Text(
                             text = if (isRunning) "Test läuft: ${activeTest?.title}" else "Letztes Testergebnis",
-                            color = if (isRunning) NeonCyan else MatrixGreen,
+                            color = when {
+                                isRunning -> NeonCyan
+                                testOutput.contains("FEHLGESCHLAGEN") -> LaserCrimson
+                                testOutput.contains("BESTANDEN") -> MatrixGreen
+                                else -> TextSecondary
+                            },
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold
                         )

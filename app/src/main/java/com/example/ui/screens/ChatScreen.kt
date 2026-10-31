@@ -259,7 +259,7 @@ fun ChatMessageItem(message: ChatMessage) {
         horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
     ) {
         Text(
-            text = if (isUser) "Nutzer" else "Qwen 2.5 1.5B (Lokal)",
+            text = if (isUser) "Nutzer" else "Lokales Modell",
             color = if (isUser) NeonCyan else MatrixGreen,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
