@@ -1,5 +1,6 @@
 package com.example
 
+import com.example.engine.InferenceConfig
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -12,6 +13,15 @@ class ExampleUnitTest {
   @Test
   fun appUsesStandaloneApplicationId() {
     assertEquals("de.mrlongnight.llmlab", BuildConfig.APPLICATION_ID)
+  }
+
+  @Test
+  fun runtimeSettingsDoNotRequireContextReloadButNativeContextSettingsDo() {
+    val loaded = InferenceConfig()
+    assertTrue(loaded.hasSameNativeContext(loaded.copy(temperature = 0.5f, maxTokens = 128)))
+    assertFalse(loaded.hasSameNativeContext(loaded.copy(nUbatch = 16)))
+    assertFalse(loaded.hasSameNativeContext(loaded.copy(nThreads = 2)))
+    assertFalse(loaded.hasSameNativeContext(loaded.copy(nCtx = loaded.nCtx * 2)))
   }
 
   @Test
