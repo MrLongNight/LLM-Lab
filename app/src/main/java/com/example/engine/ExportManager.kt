@@ -209,7 +209,7 @@ object ExportManager {
 
         val uri: Uri = FileProvider.getUriForFile(
             context,
-            "${context.packageName}.fileprovider"
+            "${context.packageName}.fileprovider",
             file
         )
 
