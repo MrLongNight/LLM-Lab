@@ -17,7 +17,7 @@ android {
     ndk { abiFilters.addAll(listOf("arm64-v8a", "x86_64")) }
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
-  ndkVersion = "29.0.13113456"
+  ndkVersion = "30.0.16248370"
   externalNativeBuild {
     cmake {
       path = file("src/main/cpp/CMakeLists.txt")
