@@ -43,7 +43,7 @@ jobs:
             keytool -genkey -v -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=LLM Lab Standalone,O=MrLongNight,C=DE"
           fi
 
-      - name: Install Vulkan shader compiler and headers
+      - name: Install Vulkan build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y glslc libvulkan-dev spirv-headers
@@ -91,63 +91,11 @@ jobs:
         run: |
           set -euo pipefail
           APK="app/build/outputs/apk/debug/app-debug.apk"
-          unzip -Z1 "$APK" | tee "$RUNNER_TEMP/llmlab-apk-files.txt"
-          grep -Eq 'lib/arm64-v8a/libllmlab_native\.so
-      - name: Prepare Standalone APK Artifact
-        run: |
-          mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/LLM-Lab-Standalone-debug.apk
-
-      - name: Upload Standalone Debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: LLM-Lab-Standalone-Debug-APK
-          path: dist/LLM-Lab-Standalone-debug.apk
-          retention-days: 30
-          if-no-files-found: error
- "$RUNNER_TEMP/llmlab-apk-files.txt"
-          grep -Eq 'lib/arm64-v8a/libggml-cpu[^/]*\.so
-      - name: Prepare Standalone APK Artifact
-        run: |
-          mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/LLM-Lab-Standalone-debug.apk
-
-      - name: Upload Standalone Debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: LLM-Lab-Standalone-Debug-APK
-          path: dist/LLM-Lab-Standalone-debug.apk
-          retention-days: 30
-          if-no-files-found: error
- "$RUNNER_TEMP/llmlab-apk-files.txt"
-          grep -Eq 'lib/arm64-v8a/libggml-vulkan[^/]*\.so
-      - name: Prepare Standalone APK Artifact
-        run: |
-          mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/LLM-Lab-Standalone-debug.apk
-
-      - name: Upload Standalone Debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: LLM-Lab-Standalone-Debug-APK
-          path: dist/LLM-Lab-Standalone-debug.apk
-          retention-days: 30
-          if-no-files-found: error
- "$RUNNER_TEMP/llmlab-apk-files.txt"
-          grep -Eq 'lib/x86_64/libllmlab_native\.so
-      - name: Prepare Standalone APK Artifact
-        run: |
-          mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/LLM-Lab-Standalone-debug.apk
-
-      - name: Upload Standalone Debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: LLM-Lab-Standalone-Debug-APK
-          path: dist/LLM-Lab-Standalone-debug.apk
-          retention-days: 30
-          if-no-files-found: error
- "$RUNNER_TEMP/llmlab-apk-files.txt"
+          unzip -Z1 "$APK" > "$RUNNER_TEMP/llmlab-apk-files.txt"
+          grep -Eq 'lib/arm64-v8a/libllmlab_native[.]so$' "$RUNNER_TEMP/llmlab-apk-files.txt"
+          grep -Eq 'lib/arm64-v8a/libggml-cpu[^/]*[.]so$' "$RUNNER_TEMP/llmlab-apk-files.txt"
+          grep -Eq 'lib/arm64-v8a/libggml-vulkan[^/]*[.]so$' "$RUNNER_TEMP/llmlab-apk-files.txt"
+          grep -Eq 'lib/x86_64/libllmlab_native[.]so$' "$RUNNER_TEMP/llmlab-apk-files.txt"
           echo "Runtime CPU variants and Vulkan backend are packaged."
 
       - name: Prepare Standalone APK Artifact
