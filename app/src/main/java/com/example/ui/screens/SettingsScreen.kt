@@ -20,6 +20,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.engine.BackendPreference
 import com.example.engine.ProfilePreset
 import com.example.ui.LLMLabViewModel
 import com.example.ui.ModelLifecycleState
@@ -29,6 +30,8 @@ import com.example.ui.theme.*
 fun SettingsScreen(viewModel: LLMLabViewModel) {
     val config by viewModel.config.collectAsState()
     val modelState by viewModel.modelState.collectAsState()
+    val availableBackends by viewModel.availableBackends.collectAsState()
+    val maxCpuThreads = Runtime.getRuntime().availableProcessors().coerceAtLeast(2)
     val contextReloadRequired = (modelState as? ModelLifecycleState.Ready)?.loadedConfig?.hasSameNativeContext(config) == false
 
     Column(
@@ -63,7 +66,7 @@ fun SettingsScreen(viewModel: LLMLabViewModel) {
 
         if (contextReloadRequired) {
             Text(
-                "Context-Parameter geändert: n_ctx, n_batch, n_ubatch oder Threads werden erst nach erneutem Laden des Modells wirksam.",
+                "Native Context-/Backend-Parameter geändert: Modell bitte neu laden, damit die neuen Einstellungen tatsächlich gelten.",
                 color = ElectricAmber,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold
@@ -126,7 +129,55 @@ fun SettingsScreen(viewModel: LLMLabViewModel) {
             }
         }
 
-        // Micro-Batching (n_ubatch) Varianten-Vergleich (1, 4, 8, 16, 32)
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = DarkSurface),
+            border = androidx.compose.foundation.BorderStroke(1.dp, DarkCardBorder)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Hardware-Backends (llama.cpp Runtime-Registry)", color = NeonCyan, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    "Die Liste zeigt Backends, die in diese APK einkompiliert wurden und sich auf diesem Gerät tatsächlich initialisieren lassen. Sie ist keine Garantie für erfolgreiche Layer-Auslagerung.",
+                    color = TextSecondary, fontSize = 11.sp
+                )
+                if (availableBackends.isEmpty()) {
+                    Text("Backend-Informationen nicht verfügbar.", color = TextMuted, fontSize = 12.sp)
+                } else {
+                    availableBackends.forEach { backend ->
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(backend.registryName, color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                Text(listOf(backend.kind, backend.bufferType).filter { it.isNotBlank() }.joinToString(" · "), color = TextMuted, fontSize = 10.sp)
+                            }
+                            Text(if (backend.available) "Initialisierbar" else "Nicht verfügbar", color = if (backend.available) MatrixGreen else TextMuted, fontSize = 11.sp)
+                        }
+                    }
+                }
+                Text("Backend-Auswahl", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                BackendPreference.values().forEach { preference ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                            .clickable { viewModel.updateConfig(config.copy(backendPreference = preference)) }
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = config.backendPreference == preference,
+                            onClick = { viewModel.updateConfig(config.copy(backendPreference = preference)) },
+                            colors = RadioButtonDefaults.colors(selectedColor = NeonCyan, unselectedColor = TextMuted)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Column {
+                            Text(preference.label, color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            Text(preference.description, color = TextMuted, fontSize = 10.sp)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Micro-Batching (n_ubatch) Varianten-Vergleich
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = DarkSurface),
@@ -152,7 +203,7 @@ fun SettingsScreen(viewModel: LLMLabViewModel) {
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    listOf(1, 4, 8, 16, 32).forEach { ubatchVal ->
+                    listOf(1, 4, 8, 16, 32, 64, 128).forEach { ubatchVal ->
                         val isUbatchSelected = config.nUbatch == ubatchVal
                         FilterChip(
                             selected = isUbatchSelected,
@@ -214,10 +265,30 @@ fun SettingsScreen(viewModel: LLMLabViewModel) {
                     Slider(
                         value = config.nThreads.toFloat(),
                         onValueChange = { viewModel.updateConfig(config.copy(nThreads = it.toInt())) },
-                        valueRange = 1f..Runtime.getRuntime().availableProcessors().toFloat().coerceAtLeast(8f),
-                        steps = (Runtime.getRuntime().availableProcessors().coerceAtLeast(8) - 2),
+                        valueRange = 1f..maxCpuThreads.toFloat(),
+                        steps = (maxCpuThreads - 2).coerceAtLeast(0),
                         colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan)
                     )
+                }
+
+
+                // Separate prompt prefill threads
+                Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("CPU-Threads Prompt-Prefill (n_threads_batch):", color = TextSecondary, fontSize = 12.sp)
+                        Text("${config.nThreadsBatch}", color = NeonCyan, fontSize = 12.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                    }
+                    Slider(
+                        value = config.nThreadsBatch.toFloat(),
+                        onValueChange = { viewModel.updateConfig(config.copy(nThreadsBatch = it.toInt().coerceIn(1, maxCpuThreads))) },
+                        valueRange = 1f..maxCpuThreads.toFloat(),
+                        steps = (maxCpuThreads - 2).coerceAtLeast(0),
+                        colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan)
+                    )
+                    Text("Separater Thread-Pool für den Prompt-Vorlauf. Die beste Kombination muss auf dem Gerät gemessen werden.", color = TextMuted, fontSize = 11.sp)
                 }
 
                 // Context Size
@@ -237,6 +308,24 @@ fun SettingsScreen(viewModel: LLMLabViewModel) {
                         colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan)
                     )
                 }
+            }
+        }
+
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = DarkSurface),
+            border = androidx.compose.foundation.BorderStroke(1.dp, DarkCardBorder)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Sampling / Antwortverhalten", color = NeonCyan, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Text("Diese Werte ändern das Sampling, nicht den geladenen Modell-Context.", color = TextMuted, fontSize = 11.sp)
+                Text("Temperatur: ${"%.2f".format(config.temperature)}", color = TextSecondary, fontSize = 12.sp)
+                Slider(value = config.temperature, onValueChange = { viewModel.updateConfig(config.copy(temperature = it)) }, valueRange = 0f..1f, steps = 19, colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan))
+                Text("Top-K: ${config.topK}", color = TextSecondary, fontSize = 12.sp)
+                Slider(value = config.topK.toFloat(), onValueChange = { viewModel.updateConfig(config.copy(topK = it.toInt().coerceIn(1, 100))) }, valueRange = 1f..100f, steps = 98, colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan))
+                Text("Top-P: ${"%.2f".format(config.topP)}", color = TextSecondary, fontSize = 12.sp)
+                Slider(value = config.topP, onValueChange = { viewModel.updateConfig(config.copy(topP = it.coerceIn(0.1f, 1f))) }, valueRange = 0.1f..1f, steps = 8, colors = SliderDefaults.colors(thumbColor = NeonCyan, activeTrackColor = NeonCyan))
             }
         }
 
