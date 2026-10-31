@@ -120,8 +120,8 @@ class ExampleRobolectricTest {
         assertEquals(ProfilePreset.BALANCED, config.selectedProfile)
         assertEquals(32, config.nUbatch)
         assertEquals(120, config.timeoutInitSec)
-        assertEquals(30, config.timeoutShortTestSec)
-        assertEquals(90, config.timeoutNormalInferenceSec)
+        assertEquals(60, config.timeoutShortTestSec)
+        assertEquals(120, config.timeoutNormalInferenceSec)
         assertEquals(120, config.timeoutStressTestSec)
 
         // Preset-Wechsel testen

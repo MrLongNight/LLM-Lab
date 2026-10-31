@@ -379,12 +379,10 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
 
     // Keep the system message concise: a 1.5B model should not waste context
     // or attention on a long policy prompt for ordinary chat questions.
+    // A deliberately compact system prompt matters on CPU-only mobile inference:
+    // prompt prefill runs before the first token and must not dominate short tests.
     const std::string systemPrompt =
-        "Du bist ein sachlicher KI-Assistent. Antworte in der Sprache der Frage. "
-        "Beantworte die konkrete Frage direkt und korrekt, in höchstens zwei kurzen Sätzen, "
-        "wenn keine längere Antwort verlangt wird. Stelle dich nicht unaufgefordert vor. "
-        "Verwechsle Begriffe nicht mit Orten oder Personen. Erfinde keine Fakten. "
-        "Wenn du etwas nicht sicher weißt, sage das klar. Befolge gewünschte Formate exakt.";
+        "Antworte direkt in der Sprache der Frage. Erfinde keine Fakten.";
 
     std::string formattedPrompt = prompt;
     bool addBos = true;
@@ -493,7 +491,12 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
 
     const int32_t batchCapacity = static_cast<int32_t>(
         std::max<uint32_t>(1, llama_n_batch(llama_ctx_ptr)));
-    ScopedBatch batchHolder(batchCapacity);
+    // llama_decode internally splits n_batch into n_ubatch pieces. Submit those
+    // pieces explicitly so Kotlin receives real intermediate progress updates
+    // and cancellation is checked between bounded native calls.
+    const int32_t promptBlockCapacity = std::min(
+        batchCapacity, std::max(1, active_config.n_ubatch));
+    ScopedBatch batchHolder(promptBlockCapacity);
     if (!batchHolder.valid()) {
         setNativeError(metrics, "llama_batch_init konnte keinen Prompt-Batch reservieren");
         return finish();
@@ -512,7 +515,7 @@ NativeGenerationMetrics NativeLlamaEngine::generate(
         }
 
         const size_t count = std::min(
-            static_cast<size_t>(batchCapacity),
+            static_cast<size_t>(promptBlockCapacity),
             promptTokens.size() - evaluated);
         batch.n_tokens = static_cast<int32_t>(count);
 

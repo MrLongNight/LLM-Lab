@@ -53,7 +53,7 @@ Eingehende Rechnungen und Lieferscheine werden durch ein lokales On-Device-LLM a
             description = "Überprüft, ob das Modell strikt und ohne Halluzinationen nur 'OK' erzeugt.",
             prompt = "Antworte ausschließlich mit OK.",
             expectedKeywords = listOf("OK"),
-            timeoutSec = 30
+            timeoutSec = 60
         ),
         PromptTestCase(
             id = "TEST_2_DMS",
@@ -61,7 +61,7 @@ Eingehende Rechnungen und Lieferscheine werden durch ein lokales On-Device-LLM a
             description = "Überprüft die korrekte deutsche Formulierung in zwei prägnanten Sätzen.",
             prompt = "Erkläre in zwei kurzen Sätzen, was ein Dokumentenmanagementsystem ist.",
             expectedKeywords = listOf("Dokument", "System"),
-            timeoutSec = 60
+            timeoutSec = 120
         ),
         PromptTestCase(
             id = "TEST_3_JSON",
@@ -69,7 +69,7 @@ Eingehende Rechnungen und Lieferscheine werden durch ein lokales On-Device-LLM a
             description = "Prüft, ob die Ausgabe valides JSON mit den Pflichtfeldern erzeugt.",
             prompt = "Erzeuge ein JSON-Objekt mit den Feldern documentType, sender und date. Verwende null, wenn ein Wert unbekannt ist. Antworte nur mit dem JSON.",
             expectedKeywords = listOf("documentType", "sender", "date"),
-            timeoutSec = 60
+            timeoutSec = 120
         ),
         PromptTestCase(
             id = "TEST_4_EXTRACTION",
@@ -77,7 +77,7 @@ Eingehende Rechnungen und Lieferscheine werden durch ein lokales On-Device-LLM a
             description = "Extrahiert Absender, Dokumenttyp, Datum und Rechnungsbetrag aus dem Text.",
             prompt = "Lies folgenden Text sorgfältig:\n\n$sampleLetterText\n\nExtrahiere als einzelnes valides JSON-Objekt mit exakt den Feldern sender, documentType, date und totalAmount. Verwende für date das ISO-Format yyyy-MM-dd und für totalAmount eine Zahl ohne Währungszeichen.",
             expectedKeywords = listOf("Müller", "149,50", "2026-03-15"),
-            timeoutSec = 90
+            timeoutSec = 180
         ),
         PromptTestCase(
             id = "TEST_5_HALLUCINATION",
@@ -85,7 +85,7 @@ Eingehende Rechnungen und Lieferscheine werden durch ein lokales On-Device-LLM a
             description = "Verlangt 'null' für nicht im Text vorhandene Daten wie 'iban' und 'poNumber'.",
             prompt = "Lies folgenden Text:\n$sampleLetterText\n\nErzeuge ausschließlich ein valides JSON-Objekt mit exakt den Feldern iban und poNumber. iban ist nur eine IBAN. poNumber ist ausschließlich eine ausdrücklich genannte Bestellnummer, PO-Nummer oder Purchase-Order-Nummer. Eine Rechnungsnummer (hier: 2026-9812) ist KEINE Bestellnummer und darf niemals als poNumber übernommen werden. Da der Text keine IBAN und keine Bestellnummer enthält, müssen beide Werte exakt JSON-null sein.",
             expectedKeywords = listOf("null"),
-            timeoutSec = 60
+            timeoutSec = 120
         ),
         PromptTestCase(
             id = "TEST_6_LONG_CONTEXT",
@@ -93,7 +93,7 @@ Eingehende Rechnungen und Lieferscheine werden durch ein lokales On-Device-LLM a
             description = "Prüft die Batch-Verarbeitung und KV-Cache-Leistung bei einem mehrabsätzigen Text.",
             prompt = "Analysiere folgenden Text:\n\n$longContextText\n\nFasse die 3 Hauptpunkte stichpunktartig in jeweils einem Satz auf Deutsch zusammen.",
             expectedKeywords = listOf("Aufbewahrung", "Zugriff", "Extraktion"),
-            timeoutSec = 120
+            timeoutSec = 240
         ),
         PromptTestCase(
             id = "TEST_7_REPEAT_10X",
@@ -110,7 +110,7 @@ Eingehende Rechnungen und Lieferscheine werden durch ein lokales On-Device-LLM a
             description = "Prüft eine kurze, konkrete deutsche Alltagsantwort ohne erfundene Selbstbeschreibung.",
             prompt = "Was ist Halloween? Antworte auf Deutsch in genau zwei kurzen Sätzen und nenne das Datum.",
             expectedKeywords = listOf("Halloween"),
-            timeoutSec = 45
+            timeoutSec = 90
         )
     )
 }

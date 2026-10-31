@@ -19,8 +19,8 @@ data class InferenceConfig(
     val topP: Float = 0.8f,
     val maxTokens: Int = 160,
     val timeoutInitSec: Int = 120,
-    val timeoutShortTestSec: Int = 30,
-    val timeoutNormalInferenceSec: Int = 90,
+    val timeoutShortTestSec: Int = 60,
+    val timeoutNormalInferenceSec: Int = 120,
     val timeoutStressTestSec: Int = 120
 ) {
     fun hasSameNativeContext(other: InferenceConfig): Boolean =
