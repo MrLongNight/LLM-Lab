@@ -47,6 +47,7 @@ public:
     bool isLoaded() const;
 
     void requestAbort();
+    void resetAbort();
     bool isAbortRequested() const;
 
     NativeGenerationMetrics generate(

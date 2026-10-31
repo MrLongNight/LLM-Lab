@@ -191,6 +191,10 @@ bool NativeLlamaEngine::isAbortRequested() const {
     return abort_flag.load();
 }
 
+void NativeLlamaEngine::resetAbort() {
+    abort_flag.store(false);
+}
+
 int64_t NativeLlamaEngine::getNativeAllocatedHeap() const {
     std::lock_guard<std::mutex> lock(engine_mutex);
     const struct mallinfo info = mallinfo();
@@ -592,7 +596,7 @@ Java_com_example_engine_LlamaNativeBridge_nativeResetAbort(JNIEnv* /* env */, jo
     if (handle != 0) {
         // Reset is only called immediately before a new serialized native operation.
         // It must not be called from inside the inference loop.
-        reinterpret_cast<NativeLlamaEngine*>(handle)->requestAbort(); // overwritten below by a dedicated reset call
+        reinterpret_cast<NativeLlamaEngine*>(handle)->resetAbort();
     }
 }
 
