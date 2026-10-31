@@ -130,9 +130,9 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `verify PromptTestCatalog contains all 7 required test cases`() {
+    fun `verify PromptTestCatalog contains all 8 required test cases`() {
         val tests = PromptTestCatalog.ALL_TESTS
-        assertEquals(7, tests.size)
+        assertEquals(8, tests.size)
 
         val ids = tests.map { it.id }
         assertTrue(ids.contains("TEST_1_OK"))
@@ -142,6 +142,7 @@ class ExampleRobolectricTest {
         assertTrue(ids.contains("TEST_5_HALLUCINATION"))
         assertTrue(ids.contains("TEST_6_LONG_CONTEXT"))
         assertTrue(ids.contains("TEST_7_REPEAT_10X"))
+        assertTrue(ids.contains("TEST_8_SIMPLE_HALLOWEEN"))
 
         val repeatTest = tests.first { it.id == "TEST_7_REPEAT_10X" }
         assertEquals(10, repeatTest.repetitionCount)

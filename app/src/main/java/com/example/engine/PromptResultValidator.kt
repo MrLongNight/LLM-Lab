@@ -37,7 +37,7 @@ object PromptResultValidator {
             "TEST_8_SIMPLE_HALLOWEEN" -> {
                 val hasDate = output.contains("31. Oktober", ignoreCase = true) || output.contains("31.10")
                 val hasContext = listOf("Kostüm", "Verkleid", "Süßigkeit", "Grusel").any { output.contains(it, ignoreCase = true) }
-                val sentenceCount = Regex("[.!?](?:\\s|$)").findAll(output).count()
+                val sentenceCount = Regex("(?<!\\d)[.!?](?:\\s|$)").findAll(output).count()
                 result(output.contains("Halloween", ignoreCase = true) && hasDate && hasContext && sentenceCount == 2,
                     "Erwartet werden genau zwei kurze Sätze, das Datum 31. Oktober und ein typischer Brauch.")
             }
