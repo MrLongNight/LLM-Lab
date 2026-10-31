@@ -49,18 +49,27 @@ class LlamaNativeBridge {
         }
     }
 
+    fun prepareForOperation() {
+        abortFlag.set(false)
+        if (isNativeLibraryLoaded && engineHandle != 0L) {
+            try {
+                nativeResetAbort(engineHandle)
+            } catch (t: Throwable) {
+                Log.e(TAG, "Abort-Zustand konnte nicht zurückgesetzt werden: ${t.message}", t)
+            }
+        }
+    }
+
     fun loadModel(
         modelPath: String,
         config: InferenceConfig,
         outError: Array<String?>
     ): Boolean {
-        abortFlag.set(false)
         if (!isNativeLibraryLoaded || engineHandle == 0L) {
             outError[0] = "Native llama.cpp Engine nicht verfügbar. Es wird kein JVM-Fallback verwendet."
             return false
         }
         return try {
-            nativeResetAbort(engineHandle)
             nativeLoadModel(
                 engineHandle,
                 modelPath,
@@ -109,8 +118,6 @@ class LlamaNativeBridge {
             return unavailableMetrics("Native llama.cpp Engine nicht verfügbar. Keine Inferenz ausgeführt.")
         }
         return try {
-            abortFlag.set(false)
-            nativeResetAbort(engineHandle)
             nativeExecuteInference(
                 engineHandle,
                 prompt,

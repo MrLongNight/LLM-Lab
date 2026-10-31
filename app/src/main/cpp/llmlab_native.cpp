@@ -192,6 +192,9 @@ bool NativeLlamaEngine::isAbortRequested() const {
 }
 
 void NativeLlamaEngine::resetAbort() {
+    // Serialize abort reset against model load / inference. A new operation must
+    // never clear the abort signal while a previous native call is still running.
+    std::lock_guard<std::mutex> lock(engine_mutex);
     abort_flag.store(false);
 }
 
