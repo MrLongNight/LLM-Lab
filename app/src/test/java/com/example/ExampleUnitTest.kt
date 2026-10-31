@@ -10,6 +10,11 @@ import org.junit.Test
  */
 class ExampleUnitTest {
   @Test
+  fun appUsesStandaloneApplicationId() {
+    assertEquals("de.mrlongnight.llmlab", BuildConfig.APPLICATION_ID)
+  }
+
+  @Test
   fun addition_isCorrect() {
     assertEquals(4, 2 + 2)
   }
