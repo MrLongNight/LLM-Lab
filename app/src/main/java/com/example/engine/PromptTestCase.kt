@@ -75,7 +75,7 @@ Eingehende Rechnungen und Lieferscheine werden durch ein lokales On-Device-LLM a
             id = "TEST_4_EXTRACTION",
             title = "4. Extraktion aus Beispielbrief",
             description = "Extrahiert Absender, Dokumenttyp, Datum und Rechnungsbetrag aus dem Text.",
-            prompt = "Lies folgenden Text sorgfältig:\n\n$sampleLetterText\n\nExtrahiere als JSON: sender, documentType, date, totalAmount.",
+            prompt = "Lies folgenden Text sorgfältig:\n\n$sampleLetterText\n\nExtrahiere als einzelnes valides JSON-Objekt mit exakt den Feldern sender, documentType, date und totalAmount. Verwende für date das ISO-Format yyyy-MM-dd und für totalAmount eine Zahl ohne Währungszeichen.",
             expectedKeywords = listOf("Müller", "149,50", "2026-03-15"),
             timeoutSec = 90
         ),
@@ -83,7 +83,7 @@ Eingehende Rechnungen und Lieferscheine werden durch ein lokales On-Device-LLM a
             id = "TEST_5_HALLUCINATION",
             title = "5. Halluzinationstest (Null-Regel)",
             description = "Verlangt 'null' für nicht im Text vorhandene Daten wie 'iban' und 'poNumber'.",
-            prompt = "Lies folgenden Text:\n$sampleLetterText\n\nWelche IBAN und welche PO-Bestellnummer (poNumber) sind angegeben? Wenn eine Information im Text nicht vorhanden ist, MUSS der Wert zwingend null sein. Erzeuge JSON.",
+            prompt = "Lies folgenden Text:\n$sampleLetterText\n\nErzeuge ausschließlich ein valides JSON-Objekt mit exakt den Feldern iban und poNumber. Wenn eine Information im Text nicht vorhanden ist, MUSS der Wert zwingend JSON-null sein.",
             expectedKeywords = listOf("null"),
             timeoutSec = 60
         ),
