@@ -112,7 +112,9 @@ object ExportManager {
         telemetry: SystemTelemetry,
         engineVersion: String,
         modelName: String,
-        modelSizeFormatted: String
+        modelSizeFormatted: String,
+        modelInfo: GgufInfo? = null,
+        modelStatus: String = "UNKNOWN"
     ): String {
         val sb = StringBuilder()
         val nowStr = SimpleDateFormat("dd.MM.yyyy HH:mm:ss", Locale.GERMANY).format(Date())
