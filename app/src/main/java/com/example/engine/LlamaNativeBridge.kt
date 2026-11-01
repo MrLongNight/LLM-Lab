@@ -43,6 +43,69 @@ class LlamaNativeBridge(private val nativeLibraryDir: String?) {
         }
     }
 
+
+    /**
+     * RPC-friendly load entry point used only by InferenceService.
+     * The active inference configuration lives on the bridge (not the Service).
+     */
+    @Volatile
+    private var activeInferenceConfig: InferenceConfig? = null
+
+    fun loadModel(modelPath: String, contextSize: Int, requireVulkan: Boolean): Boolean {
+        require(modelPath.isNotBlank()) { "Modelpfad darf nicht leer sein." }
+        require(contextSize > 0) { "contextSize muss größer als 0 sein." }
+
+        val config = InferenceConfig(
+            nCtx = contextSize,
+            nBatch = minOf(512, contextSize),
+            nUbatch = minOf(32, contextSize),
+            backendPreference = if (requireVulkan) {
+                BackendPreference.ACCELERATOR_REQUIRED
+            } else {
+                BackendPreference.AUTO
+            }
+        )
+        prepareForOperation()
+        val loaded = loadModel(modelPath, config, arrayOfNulls(1))
+        activeInferenceConfig = if (loaded) config else null
+        return loaded
+    }
+
+    /**
+     * Returns only generated text. The caller's InferenceClient owns the hard
+     * timeout; timeoutMs remains part of the RPC contract for explicitness.
+     */
+    fun generate(prompt: String, maxTokens: Int, timeoutMs: Int): String {
+        require(maxTokens > 0) { "maxTokens muss größer als 0 sein." }
+        require(timeoutMs > 0) { "timeoutMs muss größer als 0 sein." }
+        require(prompt.isNotBlank()) { "Prompt darf nicht leer sein." }
+
+        val config = checkNotNull(activeInferenceConfig) {
+            "Es wurde noch kein Modell im Inference-Prozess geladen."
+        }.copy(maxTokens = maxTokens)
+
+        prepareForOperation()
+        val output = StringBuilder()
+        val callback = object : InferenceCallback {
+            override fun onToken(tokenText: String, tokenIndex: Int) {
+                output.append(tokenText)
+            }
+
+            override fun onProgress(progressPercent: Float, step: Int) = Unit
+        }
+        val metrics = executeInference(prompt, config, callback)
+        metrics.errorMessage?.let { throw IllegalStateException(it) }
+        return output.toString()
+    }
+
+    /**
+     * A normal JNI cleanup is intentionally skipped for hard aborts: this
+     * process must die even if native Vulkan code is not returning.
+     */
+    fun shutdownProcess() {
+        android.os.Process.killProcess(android.os.Process.myPid())
+    }
+
     fun getBackendInfo(): List<NativeBackendInfo> {
         if (!isNativeLibraryLoaded || engineHandle == 0L) return emptyList()
         return runCatching { NativeBackendInfo.parseReport(nativeGetBackendReport()) }
@@ -155,7 +218,11 @@ class LlamaNativeBridge(private val nativeLibraryDir: String?) {
                 nativeUnloadModel(engineHandle)
             } catch (t: Throwable) {
                 Log.e(TAG, "Fehler beim nativen Entladen: ${t.message}", t)
+            } finally {
+                activeInferenceConfig = null
             }
+        } else {
+            activeInferenceConfig = null
         }
     }
 
@@ -235,7 +302,10 @@ class LlamaNativeBridge(private val nativeLibraryDir: String?) {
                 Log.e(TAG, "Fehler beim Zerstören der Engine: ${t.message}", t)
             } finally {
                 engineHandle = 0L
+                activeInferenceConfig = null
             }
+        } else {
+            activeInferenceConfig = null
         }
     }
 
