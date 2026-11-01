@@ -84,6 +84,8 @@ Die Integration in `myDocAnizer-Mobile` ist erst freigegeben, wenn alle fünf Kr
 
 Ein leeres Ergebnisfeld bedeutet **nicht getestet**. Häkchen, Datum und Gerät dürfen erst nach einem realen Lauf auf dem Zielgerät ergänzt werden. Die Tabelle wird nicht durch CI-Ergebnisse ersetzt.
 
+`connectedDebugAndroidTest` deckt die Instrumentationstests für Modellinitialisierung, kurze Token-Generierung, Abort mit anschließendem Reconnect/Modell-Reload und zehn Wiederholungen ab. Der vollständige `SuiteMode.FULL`-Durchlauf mit sieben Workflows sowie der Speicherdrucktest sind zusätzliche Abnahmeschritte auf dem Zielgerät; sie werden durch diesen Instrumentationstest-Befehl derzeit nicht automatisch ausgeführt.
+
 ## Integration Notes
 
 - **`InferenceClient` ist die stabile API-Grenze** für Verbindung, Binder-Aufrufe und den harten Timeout-/Abort-Pfad zur isolierten `:inference`-Service-Instanz. Neue Integrationen sollen nicht direkt `LlamaNativeBridge` oder JNI aufrufen.
