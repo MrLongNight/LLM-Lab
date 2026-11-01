@@ -1,12 +1,16 @@
 package com.example.engine;
 
-interface IInferenceService {
-    boolean loadModel(String path, int contextSize, boolean requireVulkan);
-    String generate(String prompt, int maxTokens, int timeoutMs);
-    void abort();
-    void shutdown();
+import android.os.Bundle;
+import com.example.engine.IInferenceCallback;
 
-    // The client needs the remote PID so it can SIGKILL the isolated process
-    // even when every Binder worker is blocked inside native code.
+interface IInferenceService {
+    void prepareForOperation();
+    Bundle loadModel(String path, in Bundle config);
+    Bundle executeInference(String prompt, in Bundle config, IInferenceCallback callback);
+    Bundle reconfigureContext(in Bundle config);
+    void unloadModel();
+    void abort();
+    Bundle getDiagnostics();
+    void shutdown();
     int getProcessId();
 }

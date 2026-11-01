@@ -106,12 +106,15 @@ class LlamaNativeBridge(private val nativeLibraryDir: String?) {
         android.os.Process.killProcess(android.os.Process.myPid())
     }
 
-    fun getBackendInfo(): List<NativeBackendInfo> {
-        if (!isNativeLibraryLoaded || engineHandle == 0L) return emptyList()
-        return runCatching { NativeBackendInfo.parseReport(nativeGetBackendReport()) }
+    fun getBackendReportRaw(): String {
+        if (!isNativeLibraryLoaded || engineHandle == 0L) return "[]"
+        return runCatching { nativeGetBackendReport() }
             .onFailure { Log.w(TAG, "Backend-Erkennung fehlgeschlagen: ${it.message}") }
-            .getOrDefault(emptyList())
+            .getOrDefault("[]")
     }
+
+    fun getBackendInfo(): List<NativeBackendInfo> =
+        NativeBackendInfo.parseReport(getBackendReportRaw())
 
     fun getActiveBackendName(): String {
         if (!isNativeLibraryLoaded || engineHandle == 0L) return "Native Engine nicht verfügbar"

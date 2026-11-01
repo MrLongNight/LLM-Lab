@@ -23,7 +23,7 @@ import com.example.engine.BackendPreference
 import com.example.engine.NativeBackendInfo
 import com.example.engine.InferenceCallback
 import com.example.engine.InferenceConfig
-import com.example.engine.LlamaNativeBridge
+import com.example.engine.NativeInferenceEngine
 import com.example.engine.NativeMetrics
 import com.example.engine.ProfilePreset
 import com.example.engine.PromptResultValidator
@@ -144,7 +144,7 @@ class LLMLabViewModel @JvmOverloads constructor(
 
     private val db = AppDatabase.getInstance(application)
     private val dao = db.testRunDao()
-    private val nativeBridge = LlamaNativeBridge(application.applicationInfo.nativeLibraryDir)
+    private val nativeBridge = NativeInferenceEngine(application)
     private val timeoutController = TimeoutController(timeoutConfig)
     private val huggingFaceDownloader = HuggingFaceModelDownloader(application)
     private val automatedSuiteCoordinator = AutomatedModelSuiteCoordinator()
@@ -256,8 +256,12 @@ class LLMLabViewModel @JvmOverloads constructor(
             delay(NATIVE_ABORT_GRACE_MS)
             if (operation.isActive && nativeCallInProgress.get() &&
                 nativeCallGeneration.get() == expectedNativeCallGeneration) {
-                nativeEngineUnresponsive.set(true)
-                val message = "$phase: Der native JNI-Aufruf hat das Abbruchsignal nicht innerhalb von ${NATIVE_ABORT_GRACE_MS / 1000}s quittiert. Die Engine kann nicht sicher gewaltsam beendet werden. Bitte LLM Lab neu starten."
+                // The JNI engine now lives in :inference. If its abort signal is
+                // not acknowledged, kill that process instead of declaring the
+                // whole application permanently unresponsive.
+                nativeBridge.killInferenceProcess()
+                nativeEngineUnresponsive.set(false)
+                val message = "$phase: Der isolierte Inference-Prozess hat den Abbruch nicht innerhalb von ${NATIVE_ABORT_GRACE_MS / 1000}s bestätigt und wurde beendet. Beim nächsten Vorgang wird er neu verbunden."
                 _modelState.value = ModelLifecycleState.Error(message)
                 _labActiveTest.value = null
                 _benchmarkSummary.value = _benchmarkSummary.value.copy(
@@ -322,7 +326,7 @@ class LLMLabViewModel @JvmOverloads constructor(
         return try {
             val nativeMetrics = try {
                 beginNativeCall()
-                nativeBridge.executeInference(prompt, config, timeoutSession.wrap(callback))
+                nativeBridge.executeInference(prompt, config, timeoutSession.wrap(callback), requestedTimeoutMs)
             } finally {
                 endNativeCall()
             }
@@ -650,7 +654,7 @@ class LLMLabViewModel @JvmOverloads constructor(
                 val outError = arrayOfNulls<String>(1)
                 val loadSuccess = try {
                     beginNativeCall()
-                    nativeBridge.loadModel(cacheModel.absolutePath, configForLoad, outError)
+                    nativeBridge.loadModel(cacheModel.absolutePath, configForLoad, outError, timeoutMs)
                 } finally {
                     endNativeCall()
                 }
@@ -947,7 +951,7 @@ class LLMLabViewModel @JvmOverloads constructor(
                 nativeBridge.prepareForOperation()
                 val contextUpdated = try {
                     beginNativeCall()
-                    nativeBridge.reconfigureContext(config, errors)
+                    nativeBridge.reconfigureContext(config, errors, timeoutMs)
                 } finally {
                     endNativeCall()
                 }
@@ -980,7 +984,7 @@ class LLMLabViewModel @JvmOverloads constructor(
             )
             val loaded = try {
                 beginNativeCall()
-                nativeBridge.loadModel(cacheModel.absolutePath, config, errors)
+                nativeBridge.loadModel(cacheModel.absolutePath, config, errors, timeoutMs)
             } finally {
                 endNativeCall()
             }
@@ -1332,7 +1336,7 @@ class LLMLabViewModel @JvmOverloads constructor(
             val errors = arrayOfNulls<String>(1)
             val loaded = try {
                 beginNativeCall()
-                nativeBridge.loadModel(file.absolutePath, config, errors)
+                nativeBridge.loadModel(file.absolutePath, config, errors, timeoutMs)
             } finally {
                 endNativeCall()
             }
@@ -1879,19 +1883,9 @@ class LLMLabViewModel @JvmOverloads constructor(
 
     override fun onCleared() {
         nativeBridge.requestAbort()
-        val runningOperation = activeInferenceJob
-        Thread({
-            try {
-                kotlinx.coroutines.runBlocking {
-                    runningOperation?.join()
-                }
-            } finally {
-                nativeBridge.close()
-            }
-        }, "llmlab-native-cleanup").apply {
-            isDaemon = true
-            start()
-        }
+        // The native process is independent; killing it must not wait for a
+        // stuck Binder/JNI call to return.
+        nativeBridge.close()
         super.onCleared()
     }
 }
