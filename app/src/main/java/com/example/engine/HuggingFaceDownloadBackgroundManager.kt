@@ -4,24 +4,16 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.app.job.JobInfo
-import android.app.job.JobParameters
-import android.app.job.JobScheduler
-import android.app.job.JobService
 import android.content.BroadcastReceiver
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.Build
-import android.os.Bundle
 import android.os.IBinder
-import android.os.PersistableBundle
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import androidx.annotation.RequiresApi
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -33,8 +25,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
@@ -43,9 +33,8 @@ import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
 
 /**
- * Schedules user-started GGUF downloads independently from the Activity/ViewModel lifecycle.
- * Android 14+ uses User-Initiated Data Transfer jobs; older supported releases use a dataSync
- * foreground service. Both paths write to the same resumable .part files as the HTTP downloader.
+ * Runs user-started GGUF downloads independently from the Activity/ViewModel lifecycle through
+ * one dataSync foreground service on every supported Android version.
  */
 object HuggingFaceDownloadBackgroundManager {
     const val ACTION_PROGRESS = "com.example.llmlab.MODEL_DOWNLOAD_PROGRESS"
@@ -60,11 +49,7 @@ object HuggingFaceDownloadBackgroundManager {
     const val ACTION_CANCEL = "com.example.llmlab.CANCEL_BACKGROUND_DOWNLOAD"
 
     private const val PREFS = "huggingface_background_downloads"
-    private const val KEY_SCHEDULED_IDS = "scheduled_ids"
-    private const val KEY_CANCELLED_IDS = "cancelled_ids"
-    private const val KEY_FALLBACK_PENDING_IDS = "fallback_pending_ids"
-    private const val JOB_ID_BASE = 41_700
-    private val lock = Any()
+    private const val KEY_PENDING_MODEL_IDS = "pending_model_ids"
 
     fun enqueue(context: Context, models: List<HuggingFaceModel>) {
         val app = context.applicationContext
@@ -159,44 +144,11 @@ object HuggingFaceDownloadBackgroundManager {
 
     fun cancel(context: Context, modelId: String) {
         val app = context.applicationContext
-        synchronized(lock) {
-            val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            val cancelled = prefs.getStringSet(KEY_CANCELLED_IDS, emptySet()).orEmpty().toMutableSet()
-            cancelled += modelId
-            prefs.edit().putStringSet(KEY_CANCELLED_IDS, cancelled).apply()
-        }
-        // Also cancel a UIDT job left behind by an older app version, then notify the
-        // foreground service used by current versions.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            jobIdFor(modelId)?.let { app.getSystemService(JobScheduler::class.java)?.cancel(it) }
-        }
         app.startService(
             Intent(app, HuggingFaceModelDownloadForegroundService::class.java)
                 .setAction(ACTION_CANCEL)
                 .putExtra(EXTRA_MODEL_ID, modelId)
         )
-    }
-
-    internal fun isExplicitlyCancelled(context: Context, modelId: String): Boolean {
-        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val cancelled = prefs.getStringSet(KEY_CANCELLED_IDS, emptySet()).orEmpty().toMutableSet()
-        val wasCancelled = cancelled.remove(modelId)
-        if (wasCancelled) prefs.edit().putStringSet(KEY_CANCELLED_IDS, cancelled).apply()
-        return wasCancelled
-    }
-
-    internal fun markFinished(context: Context, modelId: String) {
-        synchronized(lock) {
-            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            val scheduled = prefs.getStringSet(KEY_SCHEDULED_IDS, emptySet()).orEmpty().toMutableSet()
-            scheduled.remove(modelId)
-            val cancelled = prefs.getStringSet(KEY_CANCELLED_IDS, emptySet()).orEmpty().toMutableSet()
-            cancelled.remove(modelId)
-            prefs.edit()
-                .putStringSet(KEY_SCHEDULED_IDS, scheduled)
-                .putStringSet(KEY_CANCELLED_IDS, cancelled)
-                .apply()
-        }
     }
 
     internal fun broadcastProgress(context: Context, model: HuggingFaceModel, downloaded: Long, total: Long) {
@@ -226,152 +178,18 @@ object HuggingFaceDownloadBackgroundManager {
         )
     }
 
-    private fun enqueueUserInitiatedJobs(context: Context, models: List<HuggingFaceModel>) {
-        val scheduler = context.getSystemService(JobScheduler::class.java)
-            ?: throw IllegalStateException("Android JobScheduler ist nicht verfügbar.")
-        for (model in models.distinctBy { it.id }) {
-            val jobId = jobIdFor(model.id)
-                ?: throw IllegalArgumentException("Unbekannte Modell-ID: ${model.id}")
-            synchronized(lock) {
-                val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                val scheduled = prefs.getStringSet(KEY_SCHEDULED_IDS, emptySet()).orEmpty().toMutableSet()
-                val systemHasJob = scheduler.allPendingJobs.any { it.id == jobId }
-                // A user can stop a UIDT job from Android's Task Manager. Android then kills
-                // the app process and does not call onStopJob(); reconcile stale persisted IDs.
-                if (model.id in scheduled && systemHasJob) return@synchronized
-
-                scheduled.remove(model.id)
-                scheduled += model.id
-                val cancelled = prefs.getStringSet(KEY_CANCELLED_IDS, emptySet()).orEmpty().toMutableSet()
-                cancelled.remove(model.id)
-                prefs.edit()
-                    .putStringSet(KEY_SCHEDULED_IDS, scheduled)
-                    .putStringSet(KEY_CANCELLED_IDS, cancelled)
-                    .commit()
-
-                val extras = PersistableBundle().apply { putString(EXTRA_MODEL_ID, model.id) }
-                val jobInfo = JobInfo.Builder(
-                    jobId,
-                    ComponentName(context, HuggingFaceModelDownloadJobService::class.java)
-                )
-                    .setUserInitiated(true)
-                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                    .setEstimatedNetworkBytes(model.estimatedSizeBytes, 0L)
-                    .setExtras(extras)
-                    .build()
-                if (scheduler.schedule(jobInfo) != JobScheduler.RESULT_SUCCESS) {
-                    scheduled.remove(model.id)
-                    prefs.edit().putStringSet(KEY_SCHEDULED_IDS, scheduled).commit()
-                    throw IOException("Android konnte den Hintergrund-Download für ${model.filename} nicht einplanen.")
-                }
-            }
-        }
-    }
-
-    private fun jobIdFor(modelId: String): Int? {
-        val index = HuggingFaceModelCatalog.models.indexOfFirst { it.id == modelId }
-        return index.takeIf { it >= 0 }?.let { JOB_ID_BASE + it }
-    }
-
-    internal fun pendingFallbackIds(context: Context): MutableSet<String> {
+    internal fun pendingModelIds(context: Context): MutableSet<String> {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        return prefs.getStringSet(KEY_FALLBACK_PENDING_IDS, emptySet()).orEmpty().toMutableSet()
+        return prefs.getStringSet(KEY_PENDING_MODEL_IDS, emptySet()).orEmpty().toMutableSet()
     }
 
-    internal fun saveFallbackIds(context: Context, ids: Set<String>) {
+    internal fun savePendingModelIds(context: Context, ids: Set<String>) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putStringSet(KEY_FALLBACK_PENDING_IDS, ids).apply()
+            .edit().putStringSet(KEY_PENDING_MODEL_IDS, ids).apply()
     }
 }
 
-@RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
-class HuggingFaceModelDownloadJobService : JobService() {
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val runningJobs = ConcurrentHashMap<Int, Job>()
-
-    override fun onStartJob(params: JobParameters): Boolean {
-        val modelId = params.extras.getString(HuggingFaceDownloadBackgroundManager.EXTRA_MODEL_ID)
-        val model = modelId?.let(HuggingFaceModelCatalog::find)
-        if (model == null) {
-            return false
-        }
-
-        val notificationId = params.jobId
-        setNotification(
-            params,
-            notificationId,
-            DownloadNotification.build(this, model, 0L, model.estimatedSizeBytes, "Download wird vorbereitet…"),
-            JOB_END_NOTIFICATION_POLICY_DETACH
-        )
-
-        val job = serviceScope.launch {
-            try {
-                downloadSlots.withPermit {
-                    HuggingFaceModelDownloader(applicationContext).download(model) { downloaded, total ->
-                        updateTransferredNetworkBytes(params, downloaded.coerceAtLeast(0L), 0L)
-                        setNotification(
-                            params,
-                            notificationId,
-                            DownloadNotification.build(this@HuggingFaceModelDownloadJobService, model, downloaded, total, "Modell wird geladen…"),
-                            JOB_END_NOTIFICATION_POLICY_DETACH
-                        )
-                        HuggingFaceDownloadBackgroundManager.broadcastProgress(applicationContext, model, downloaded, total)
-                    }
-                }
-                HuggingFaceDownloadBackgroundManager.markFinished(applicationContext, model.id)
-                HuggingFaceDownloadBackgroundManager.broadcastCompleted(applicationContext, model)
-                setNotification(
-                    params,
-                    notificationId,
-                    DownloadNotification.build(this@HuggingFaceModelDownloadJobService, model, model.estimatedSizeBytes, model.estimatedSizeBytes, "Download abgeschlossen"),
-                    JOB_END_NOTIFICATION_POLICY_REMOVE
-                )
-                jobFinished(params, false)
-            } catch (cancelled: CancellationException) {
-                // onStopJob() decides whether Android should restart this resumable transfer.
-                throw cancelled
-            } catch (error: Throwable) {
-                HuggingFaceDownloadBackgroundManager.markFinished(applicationContext, model.id)
-                HuggingFaceDownloadBackgroundManager.broadcastFailed(
-                    applicationContext,
-                    model,
-                    error.message ?: error.javaClass.simpleName
-                )
-                setNotification(
-                    params,
-                    notificationId,
-                    DownloadNotification.build(this@HuggingFaceModelDownloadJobService, model, 0L, model.estimatedSizeBytes, "Download fehlgeschlagen"),
-                    JOB_END_NOTIFICATION_POLICY_REMOVE
-                )
-                jobFinished(params, false)
-            } finally {
-                runningJobs.remove(params.jobId)
-            }
-        }
-        runningJobs[params.jobId] = job
-        return true
-    }
-
-    override fun onStopJob(params: JobParameters): Boolean {
-        val modelId = params.extras.getString(HuggingFaceDownloadBackgroundManager.EXTRA_MODEL_ID).orEmpty()
-        runningJobs.remove(params.jobId)?.cancel()
-        val cancelledByUser = HuggingFaceDownloadBackgroundManager.isExplicitlyCancelled(this, modelId)
-        if (cancelledByUser) HuggingFaceDownloadBackgroundManager.markFinished(this, modelId)
-        return !cancelledByUser
-    }
-
-    override fun onDestroy() {
-        serviceScope.cancel()
-        super.onDestroy()
-    }
-
-    private companion object {
-        // Two large GGUF transfers are allowed simultaneously; inference stays serial.
-        val downloadSlots = Semaphore(2)
-    }
-}
-
-/** Foreground-service fallback for Android 10–13, before user-initiated transfer jobs existed. */
+/** User-started model downloads on all supported Android versions. */
 class HuggingFaceModelDownloadForegroundService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var processor: Job? = null
@@ -392,9 +210,9 @@ class HuggingFaceModelDownloadForegroundService : Service() {
             if (modelId != null) {
                 val model = HuggingFaceModelCatalog.find(modelId) ?: return START_NOT_STICKY
                 synchronized(downloadLock) {
-                    val pending = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(this)
+                    val pending = HuggingFaceDownloadBackgroundManager.pendingModelIds(this)
                     pending.remove(modelId)
-                    HuggingFaceDownloadBackgroundManager.saveFallbackIds(this, pending)
+                    HuggingFaceDownloadBackgroundManager.savePendingModelIds(this, pending)
                     activeDownloadJobs[modelId]?.cancel(CancellationException(USER_CANCEL_REASON))
                 }
                 HuggingFaceDownloadBackgroundManager.broadcastFailed(
@@ -403,7 +221,7 @@ class HuggingFaceModelDownloadForegroundService : Service() {
                     "Download wurde vom Nutzer abgebrochen. Der bisherige Fortschritt bleibt erhalten."
                 )
             }
-            if (HuggingFaceDownloadBackgroundManager.pendingFallbackIds(this).isEmpty()) {
+            if (HuggingFaceDownloadBackgroundManager.pendingModelIds(this).isEmpty()) {
                 processor?.cancel()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf(startId)
@@ -412,11 +230,11 @@ class HuggingFaceModelDownloadForegroundService : Service() {
         }
 
         synchronized(downloadLock) {
-            val pending = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(this)
+            val pending = HuggingFaceDownloadBackgroundManager.pendingModelIds(this)
             intent?.getStringArrayListExtra(HuggingFaceDownloadBackgroundManager.EXTRA_MODEL_IDS)
                 ?.filter { HuggingFaceModelCatalog.find(it) != null }
                 ?.forEach { pending += it }
-            HuggingFaceDownloadBackgroundManager.saveFallbackIds(this, pending)
+            HuggingFaceDownloadBackgroundManager.savePendingModelIds(this, pending)
         }
 
         startForeground(
@@ -431,7 +249,7 @@ class HuggingFaceModelDownloadForegroundService : Service() {
 
     private suspend fun processPendingDownloads() {
         while (true) {
-            val batch = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(this).take(2)
+            val batch = HuggingFaceDownloadBackgroundManager.pendingModelIds(this).take(2)
             if (batch.isEmpty()) break
 
             coroutineScope {
@@ -443,7 +261,7 @@ class HuggingFaceModelDownloadForegroundService : Service() {
                         // Registration and queue removal are synchronized so a cancel action
                         // cannot slip between checking the queue and registering the active job.
                         val shouldRun = synchronized(downloadLock) {
-                            val pending = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(
+                            val pending = HuggingFaceDownloadBackgroundManager.pendingModelIds(
                                 this@HuggingFaceModelDownloadForegroundService
                             )
                             if (modelId !in pending) {
@@ -485,11 +303,11 @@ class HuggingFaceModelDownloadForegroundService : Service() {
                             synchronized(downloadLock) {
                                 activeDownloadJobs.remove(modelId, ownJob)
                                 if (finished) {
-                                    val pending = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(
+                                    val pending = HuggingFaceDownloadBackgroundManager.pendingModelIds(
                                         this@HuggingFaceModelDownloadForegroundService
                                     )
                                     pending.remove(model.id)
-                                    HuggingFaceDownloadBackgroundManager.saveFallbackIds(
+                                    HuggingFaceDownloadBackgroundManager.savePendingModelIds(
                                         this@HuggingFaceModelDownloadForegroundService,
                                         pending
                                     )
