@@ -6,12 +6,18 @@ Eigenständige Android-Test-App zur Untersuchung echter lokaler GGUF-Inferenz au
 
 - Android, Kotlin, Jetpack Compose, Room und C++/JNI.
 - Native Engine: `llama.cpp`, fest gepinnt als Git-Submodul unter `third_party/llama.cpp` auf Commit `78feec062d50ec9e8940244cac918ac4480b60cb` (API-Version `0.8.0-dev`).
-- **CPU (stabil):** als sicherer Fallback einkompiliert und der Referenzpfad für verlässliche Inferenz. **Vulkan (experimentell):** generisches GPU-Backend; die Verfügbarkeit wird zur Laufzeit über die llama.cpp-Registry geprüft. Der native Code läuft isoliert im Android-Prozess `:inference`. CUDA/Metal sind auf Android nicht aktiviert. **NPU:** nicht enthalten; siehe [docs/npu-backend.md](docs/npu-backend.md).
-- GGUF-Modell wird über den Android-Dateiauswahldialog ausgewählt und vor dem nativen Laden in den internen App-Speicher kopiert. Das Modell ist nicht in der APK enthalten.
+- Native Inferenz läuft in einem separaten Android-Prozess `:inference`; die Backends und ihr Status sind im Abschnitt [Backends](#backends) beschrieben.
+- Ein importiertes GGUF-Modell wird über den Android-Dateiauswahldialog ausgewählt und vor dem nativen Laden in den internen App-Speicher kopiert. Verifizierte Hugging-Face-Modelle bleiben dauerhaft unter `filesDir/models`; sie werden nicht zusätzlich als `active_model.gguf` dupliziert. Modelle sind nicht in der APK enthalten.
 - Eigenständige Package-ID: `de.mrlongnight.llmlab`; `minSdk=29` (Android 10), `targetSdk=36`, ABIs `arm64-v8a` und `x86_64`.
 - Keine Firebase-, Gemini-, Cloud-Inferenz-, Login- oder externen KI-API-Abhängigkeiten. Internetzugriff wird ausschließlich für vom Nutzer gestartete HTTPS-Downloads der Qwen-GGUF-Dateien von Hugging Face verwendet; die Inferenz läuft anschließend lokal. Android-App-Backup ist deaktiviert.
 
 Die App darf „Modell bereit“ erst anzeigen, wenn Modell und llama.cpp-Kontext erfolgreich initialisiert wurden. Bei fehlender nativer Bibliothek gibt es keinen JVM-Ersatzpfad. Die Backend-Registry meldet verfügbare Backends und deren Eigenschaften. Der Standardpfad `AUTO` bleibt auf CPU; Vulkan wird nur mit `ACCELERATOR_REQUIRED` ausdrücklich angefordert.
+
+## Backends
+
+- **CPU – stabil:** sicherer Referenzpfad; `AUTO` verwendet derzeit CPU.
+- **Vulkan – experimentell:** generisches GPU-Backend, ausdrücklich über `ACCELERATOR_REQUIRED` angefordert. Es läuft ebenfalls isoliert in `:inference`; ein harter Timeout/Abort kann diesen Prozess beenden. Das ist keine Aussage, dass Vulkan-Kernel kooperativ abbrechen oder ein Vulkan-Fehler behoben wäre.
+- **NPU – nicht enthalten:** derzeit kein Qualcomm-QNN/Hexagon-, MediaTek-NeuroPilot- oder anderes Hersteller-NPU-Backend. Details: [docs/npu-backend.md](docs/npu-backend.md).
 
 ## Build und Tests
 
