@@ -15,6 +15,7 @@ import com.example.engine.GgufInfo
 import com.example.engine.GgufMetadataParser
 import com.example.engine.HuggingFaceModelCatalog
 import com.example.engine.HuggingFaceModelDownloader
+import com.example.engine.HuggingFaceDownloadBackgroundManager
 import com.example.engine.AutomatedModelSuitePlan
 import com.example.engine.AutomatedModelSuiteCoordinator
 import com.example.engine.AutomatedModelSuiteProgress
@@ -155,6 +156,7 @@ class LLMLabViewModel @JvmOverloads constructor(
     private val _automatedSuite = MutableStateFlow(AutomatedModelSuiteUiState())
     val automatedSuite: StateFlow<AutomatedModelSuiteUiState> = _automatedSuite.asStateFlow()
     private var huggingFaceDownloadJob: Job? = null
+    @Volatile private var activeHuggingFaceDownloadId: String? = null
 
     private val _currentTab = MutableStateFlow(0)
     val currentTab: StateFlow<Int> = _currentTab.asStateFlow()
@@ -484,21 +486,26 @@ class LLMLabViewModel @JvmOverloads constructor(
     fun downloadHuggingFaceModel(modelId: String) {
         val model = HuggingFaceModelCatalog.find(modelId) ?: return
         if (huggingFaceDownloadJob?.isActive == true) return
+        activeHuggingFaceDownloadId = model.id
 
         huggingFaceDownloadJob = viewModelScope.launch(Dispatchers.IO) {
             _huggingFaceDownload.value = HuggingFaceDownloadUiState(
                 modelId = model.id,
                 isDownloading = true,
-                message = "Verbinde mit Hugging Face…"
+                message = "Hintergrund-Download wird eingeplant…"
             )
             try {
-                val file = huggingFaceDownloader.download(model) { downloaded, total ->
+                val file = HuggingFaceDownloadBackgroundManager.download(getApplication(), model) { downloaded, total ->
                     _huggingFaceDownload.value = HuggingFaceDownloadUiState(
                         modelId = model.id,
                         downloadedBytes = downloaded,
                         totalBytes = total,
                         isDownloading = true,
-                        message = if (total > 0L && downloaded >= total) "Prüfe SHA-256 und GGUF-Header…" else "Download von Hugging Face läuft…"
+                        message = if (total > 0L && downloaded >= total) {
+                            "Prüfe SHA-256 und GGUF-Header…"
+                        } else {
+                            "Hintergrund-Download läuft…"
+                        }
                     )
                 }
                 _downloadedModelIds.value = _downloadedModelIds.value + model.id
@@ -514,7 +521,7 @@ class LLMLabViewModel @JvmOverloads constructor(
                 _huggingFaceDownload.value = HuggingFaceDownloadUiState(
                     modelId = model.id,
                     isDownloading = false,
-                    message = "Download abgebrochen. Der bisherige Fortschritt bleibt zum Fortsetzen erhalten."
+                    message = "Download wird im Hintergrund fortgesetzt; vorhandene Bytes bleiben erhalten."
                 )
                 throw cancelled
             } catch (error: Exception) {
@@ -525,12 +532,14 @@ class LLMLabViewModel @JvmOverloads constructor(
                     error = error.message ?: "Unbekannter Download-Fehler"
                 )
             } finally {
+                activeHuggingFaceDownloadId = null
                 refreshDownloadedModels()
             }
         }
     }
 
     fun cancelHuggingFaceDownload() {
+        activeHuggingFaceDownloadId?.let { HuggingFaceDownloadBackgroundManager.cancel(getApplication(), it) }
         huggingFaceDownloadJob?.cancel()
     }
 
@@ -1561,6 +1570,10 @@ class LLMLabViewModel @JvmOverloads constructor(
                     )
                 }
 
+                // Schedule every requested transfer while the user-initiated suite is foregrounded.
+                // The coordinator then awaits the same jobs in batches of at most two.
+                HuggingFaceDownloadBackgroundManager.enqueue(getApplication(), requiredModels)
+
                 automatedSuiteCoordinator.run(
                     request = request,
                     models = models,
@@ -1590,7 +1603,7 @@ class LLMLabViewModel @JvmOverloads constructor(
                     onOutput = { output -> _labTestOutput.value = output },
                     downloadModel = { model, index, count ->
                         val existing = findLocalHuggingFaceModel(model)
-                        val file = existing ?: huggingFaceDownloader.download(model) { downloaded, total ->
+                        val file = existing ?: HuggingFaceDownloadBackgroundManager.download(getApplication(), model) { downloaded, total ->
                             if (automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()) {
                                 throw CancellationException("Automatische Testreihe wurde während des Downloads abgebrochen.")
                             }
