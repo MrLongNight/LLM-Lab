@@ -9,6 +9,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.Implementation
+import org.robolectric.annotation.Implements
+import android.os.StatFs
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.ServerSocket
@@ -20,8 +23,20 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
+
+/**
+ * Robolectric does not model the host filesystem's free space consistently.
+ * Keep downloader tests focused on HTTP behavior while preserving the production
+ * low-storage guard unchanged.
+ */
+@Implements(StatFs::class)
+class DownloaderTestStatFsShadow {
+    @Implementation
+    fun getAvailableBytes(): Long = 1024L * 1024L * 1024L
+}
+
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [36], shadows = [DownloaderTestStatFsShadow::class])
 class HuggingFaceModelDownloaderTest {
 
     @Test
