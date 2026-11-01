@@ -107,7 +107,11 @@ object HuggingFaceDownloadBackgroundManager {
                                 )
                             } catch (error: Throwable) {
                                 unregisterReceiver()
-                                continuation.cancel(error)
+                                val cancellation = error as? CancellationException
+                                    ?: CancellationException("Download-Fortschritt wurde abgebrochen.").apply {
+                                        initCause(error)
+                                    }
+                                continuation.cancel(cancellation)
                             }
                         }
                         ACTION_COMPLETED -> {
