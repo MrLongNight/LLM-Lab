@@ -59,7 +59,7 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
             fontWeight = FontWeight.Bold
         )
         Text(
-            text = "Drei Fachtests nutzen je drei Standardprofile. Zusätzlich gibt es einen 8-Profil-Hardwaretest und einen 5-Profil-Samplingtest.",
+            text = "Nur der Durchsatzvergleich enthält eine CPU-Referenz. DMS, Extraktion und alle Tuning-/Prefill-Läufe verwenden Vulkan; damit werden langsame CPU-Wiederholungen vermieden.",
             color = TextSecondary,
             fontSize = 12.sp
         )
@@ -81,7 +81,13 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
                     )
                 }
                 Text(
-                    text = "Hardware-Tuning: ${PromptTestCatalog.TUNING_VARIANTS.size} Profile · CPU 2/4/6/8 Threads · Prefill 8 · ubatch 64/128 · Vulkan 4/8 Threads.",
+                    text = "Vulkan-Tuning: ${PromptTestCatalog.TUNING_VARIANTS.size} Profile · Vulkan-Generierung mit 2/4/6/8 CPU-Threads · ubatch 64/128.",
+                    color = TextSecondary,
+                    fontSize = 9.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                Text(
+                    text = "Prefill: 2 Prompt-Längen · je ${PromptTestCatalog.PREFILL_VARIANTS.size} Vulkan-ubatch-Profile (32/64/128).",
                     color = TextSecondary,
                     fontSize = 9.sp,
                     fontFamily = FontFamily.Monospace
@@ -204,9 +210,11 @@ private fun PromptWorkflowCard(
     onExecute: () -> Unit
 ) {
     val profileCount = when (testCase.id) {
+        "TEST_PERFORMANCE" -> PromptTestCatalog.PARAMETER_VARIANTS.size
         "TEST_TUNING" -> PromptTestCatalog.TUNING_VARIANTS.size
         "TEST_SAMPLING" -> PromptTestCatalog.SAMPLING_VARIANTS.size
-        else -> PromptTestCatalog.PARAMETER_VARIANTS.size
+        "TEST_PREFILL_256", "TEST_PREFILL_512" -> PromptTestCatalog.PREFILL_VARIANTS.size
+        else -> PromptTestCatalog.VULKAN_ONLY_VARIANTS.size
     }
     Card(
         modifier = Modifier.fillMaxWidth(),

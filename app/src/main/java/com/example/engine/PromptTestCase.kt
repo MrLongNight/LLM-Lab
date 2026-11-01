@@ -54,19 +54,11 @@ object PromptTestCatalog {
     """.trimIndent()
 
     /** Sampling stays fixed so performance differences mainly reflect backend/batch/thread settings. */
+    /** One CPU reference and one Vulkan profile; no redundant CPU wide-batch sweep. */
     val PARAMETER_VARIANTS: List<InferenceTestVariant> = listOf(
         InferenceTestVariant(
             id = "CPU_REFERENCE",
-            label = "CPU-Referenz · 4 Threads · ubatch 32",
-            nBatch = 512,
-            nUbatch = 32,
-            nThreads = 4,
-            nThreadsBatch = 8,
-            backendPreference = BackendPreference.AUTO
-        ),
-        InferenceTestVariant(
-            id = "CPU_WIDEBATCH",
-            label = "CPU-Optimierung · 4 Threads · ubatch 64",
+            label = "CPU-Referenz · 4 Threads · ubatch 64",
             nBatch = 512,
             nUbatch = 64,
             nThreads = 4,
@@ -88,15 +80,13 @@ object PromptTestCatalog {
      * Short hardware sweep. Each configuration keeps sampling fixed.
      * The target phone has eight logical CPU cores.
      */
+    /** Thread/ubatch tuning while Vulkan remains mandatory for every run. */
     val TUNING_VARIANTS: List<InferenceTestVariant> = listOf(
-        InferenceTestVariant("CPU_GEN_2_8", "CPU 2/8 Threads · ubatch 64", 512, 64, 2, 8, BackendPreference.CPU_ONLY),
-        InferenceTestVariant("CPU_GEN_4_8", "CPU 4/8 Threads · ubatch 64", 512, 64, 4, 8, BackendPreference.CPU_ONLY),
-        InferenceTestVariant("CPU_GEN_6_8", "CPU 6/8 Threads · ubatch 64", 512, 64, 6, 8, BackendPreference.CPU_ONLY),
-        InferenceTestVariant("CPU_GEN_8_8", "CPU 8/8 Threads · ubatch 64", 512, 64, 8, 8, BackendPreference.CPU_ONLY),
-        InferenceTestVariant("CPU_GEN_8_8_UB128", "CPU 8/8 Threads · ubatch 128", 512, 128, 8, 8, BackendPreference.CPU_ONLY),
-        InferenceTestVariant("VULKAN_GEN_4_8", "Vulkan 4/8 Threads · ubatch 64", 512, 64, 4, 8, BackendPreference.ACCELERATOR_REQUIRED),
-        InferenceTestVariant("VULKAN_GEN_8_8", "Vulkan 8/8 Threads · ubatch 64", 512, 64, 8, 8, BackendPreference.ACCELERATOR_REQUIRED),
-        InferenceTestVariant("VULKAN_GEN_8_8_UB128", "Vulkan 8/8 Threads · ubatch 128", 512, 128, 8, 8, BackendPreference.ACCELERATOR_REQUIRED)
+        InferenceTestVariant("VK_GEN_2_8", "Vulkan · 2/8 Threads · ubatch 64", 512, 64, 2, 8, BackendPreference.ACCELERATOR_REQUIRED),
+        InferenceTestVariant("VK_GEN_4_8", "Vulkan · 4/8 Threads · ubatch 64", 512, 64, 4, 8, BackendPreference.ACCELERATOR_REQUIRED),
+        InferenceTestVariant("VK_GEN_6_8", "Vulkan · 6/8 Threads · ubatch 64", 512, 64, 6, 8, BackendPreference.ACCELERATOR_REQUIRED),
+        InferenceTestVariant("VK_GEN_8_8", "Vulkan · 8/8 Threads · ubatch 64", 512, 64, 8, 8, BackendPreference.ACCELERATOR_REQUIRED),
+        InferenceTestVariant("VK_GEN_8_8_UB128", "Vulkan · 8/8 Threads · ubatch 128", 512, 128, 8, 8, BackendPreference.ACCELERATOR_REQUIRED)
     )
 
     /**
@@ -110,6 +100,22 @@ object PromptTestCatalog {
         InferenceTestVariant("SAMPLE_TOPK_40", "Top-K 40", 512, 64, 8, 8, BackendPreference.ACCELERATOR_REQUIRED, 0.05f, 40, 0.8f),
         InferenceTestVariant("SAMPLE_TOPP_095", "Top-P 0.95", 512, 64, 8, 8, BackendPreference.ACCELERATOR_REQUIRED, 0.05f, 20, 0.95f)
     )
+
+    /** Functional checks run only with confirmed Vulkan backend selection. */
+    val VULKAN_ONLY_VARIANTS: List<InferenceTestVariant> = listOf(
+        InferenceTestVariant("VULKAN_FUNCTIONAL", "Vulkan · 4/8 Threads · ubatch 64", 512, 64, 4, 8, BackendPreference.ACCELERATOR_REQUIRED)
+    )
+
+    /** Three Vulkan ubatch sizes for prefill throughput; no CPU-only repetitions. */
+    val PREFILL_VARIANTS: List<InferenceTestVariant> = listOf(
+        InferenceTestVariant("PREFILL_UBATCH_32", "Vulkan · ubatch 32", 512, 32, 4, 8, BackendPreference.ACCELERATOR_REQUIRED),
+        InferenceTestVariant("PREFILL_UBATCH_64", "Vulkan · ubatch 64", 512, 64, 4, 8, BackendPreference.ACCELERATOR_REQUIRED),
+        InferenceTestVariant("PREFILL_UBATCH_128", "Vulkan · ubatch 128", 512, 128, 4, 8, BackendPreference.ACCELERATOR_REQUIRED)
+    )
+
+    private val prefillSource = "Ein eingehender Beleg wird lokal als PDF gespeichert. Die Texterkennung liest sichtbare Inhalte aus und erstellt maschinenlesbaren Text. Absender, Datum und Betrag werden nur übernommen, wenn sie im Beleg stehen. Fehlende Angaben bleiben ausdrücklich leer. Der Text wird anschließend verschlüsselt gespeichert und für die lokale Suche indexiert."
+    private val prefill256Text = List(4) { prefillSource }.joinToString(" ")
+    private val prefill512Text = List(8) { prefillSource }.joinToString(" ")
 
     val ALL_TESTS: List<PromptTestCase> = listOf(
         PromptTestCase(
@@ -142,8 +148,8 @@ object PromptTestCatalog {
         ),
         PromptTestCase(
             id = "TEST_TUNING",
-            title = "4. Hardware-Tuning · CPU/GPU/8 Kerne",
-            description = "Vergleicht CPU-Generierung mit 2, 4, 6 und 8 Threads, 8 Prefill-Threads, ubatch 64/128 sowie Vulkan mit 4/8 Threads. Bewertet Messwerte statt Satzanzahl.",
+            title = "4. Vulkan-Hardware-Tuning",
+            description = "Vergleicht fünf Vulkan-Konfigurationen mit 2/4/6/8 CPU-Threads und ubatch 64/128. CPU-only wird hier nicht wiederholt; bewertet werden Messwerte statt Satzanzahl.",
             prompt = "Ein Dokument wird lokal als PDF gespeichert. OCR wandelt den sichtbaren Inhalt in maschinenlesbaren Text um. Dieser Text wird für die Volltextsuche indexiert. Metadaten wie Absender und Datum werden nur übernommen, wenn sie im Dokument stehen. Erkläre in einem kurzen deutschen Satz den Zweck von OCR.",
             expectedKeywords = listOf("OCR"),
             maxTokens = 40,
@@ -157,6 +163,24 @@ object PromptTestCatalog {
             expectedKeywords = listOf("OCR"),
             maxTokens = 40,
             timeoutSec = 120
+        ),
+        PromptTestCase(
+            id = "TEST_PREFILL_256",
+            title = "6. Mittlerer Prompt-Prefill (~256 Tokens)",
+            description = "Misst die Verarbeitung eines mittellangen, wiederholbaren OCR-Belegtexts mit drei Vulkan-ubatch-Profilen.",
+            prompt = "Lies den folgenden Belegtext vollständig. Antworte danach ausschließlich mit dem Wort OCR. Belegtext:\n$prefill256Text",
+            expectedKeywords = listOf("OCR"),
+            maxTokens = 12,
+            timeoutSec = 240
+        ),
+        PromptTestCase(
+            id = "TEST_PREFILL_512",
+            title = "7. Langer Prompt-Prefill (~512 Tokens)",
+            description = "Misst die Verarbeitung eines längeren OCR-Belegtexts mit denselben drei Vulkan-ubatch-Profilen.",
+            prompt = "Lies den folgenden Belegtext vollständig. Antworte danach ausschließlich mit dem Wort OCR. Belegtext:\n$prefill512Text",
+            expectedKeywords = listOf("OCR"),
+            maxTokens = 12,
+            timeoutSec = 300
         )
     )
 }

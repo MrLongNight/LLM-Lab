@@ -134,38 +134,42 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `verify PromptTestCatalog contains three workflows and three parameter profiles`() {
+    fun `verify PromptTestCatalog defines seven workflows and Vulkan-first profiles`() {
         val workflows = PromptTestCatalog.ALL_TESTS
-        assertEquals(5, workflows.size)
+        assertEquals(7, workflows.size)
         assertEquals(
-            listOf("TEST_PERFORMANCE", "TEST_DMS", "TEST_EXTRACTION", "TEST_TUNING", "TEST_SAMPLING"),
+            listOf(
+                "TEST_PERFORMANCE", "TEST_DMS", "TEST_EXTRACTION",
+                "TEST_TUNING", "TEST_SAMPLING", "TEST_PREFILL_256", "TEST_PREFILL_512"
+            ),
             workflows.map { it.id }
         )
 
         val variants = PromptTestCatalog.PARAMETER_VARIANTS
-        assertEquals(3, variants.size)
-        assertEquals(
-            listOf("CPU_REFERENCE", "CPU_WIDEBATCH", "VULKAN_OFFLOAD"),
-            variants.map { it.id }
-        )
+        assertEquals(2, variants.size)
+        assertEquals(listOf("CPU_REFERENCE", "VULKAN_OFFLOAD"), variants.map { it.id })
+        assertEquals(64, variants.first().nUbatch)
+        assertEquals(64, variants.last().nUbatch)
+        assertEquals(4, variants.first().nThreads)
+        assertEquals(8, variants.first().nThreadsBatch)
+        assertEquals(BackendPreference.CPU_ONLY, variants.first().backendPreference)
         assertEquals(BackendPreference.ACCELERATOR_REQUIRED, variants.last().backendPreference)
-        assertEquals(8, PromptTestCatalog.TUNING_VARIANTS.size)
+
+        assertEquals(5, PromptTestCatalog.TUNING_VARIANTS.size)
         assertEquals(listOf(2, 4, 6, 8), PromptTestCatalog.TUNING_VARIANTS.take(4).map { it.nThreads })
+        assertTrue(PromptTestCatalog.TUNING_VARIANTS.all { it.backendPreference == BackendPreference.ACCELERATOR_REQUIRED })
         assertTrue(PromptTestCatalog.TUNING_VARIANTS.all { it.nThreadsBatch == 8 })
         assertEquals(128, PromptTestCatalog.TUNING_VARIANTS[4].nUbatch)
-        assertEquals(BackendPreference.ACCELERATOR_REQUIRED, PromptTestCatalog.TUNING_VARIANTS.last().backendPreference)
+
+        assertEquals(3, PromptTestCatalog.PREFILL_VARIANTS.size)
+        assertTrue(PromptTestCatalog.PREFILL_VARIANTS.all { it.backendPreference == BackendPreference.ACCELERATOR_REQUIRED })
+        assertEquals(1, PromptTestCatalog.VULKAN_ONLY_VARIANTS.size)
+        assertEquals(BackendPreference.ACCELERATOR_REQUIRED, PromptTestCatalog.VULKAN_ONLY_VARIANTS.single().backendPreference)
+
         assertEquals(5, PromptTestCatalog.SAMPLING_VARIANTS.size)
         assertEquals(listOf(0.05f, 0.0f, 0.2f, 0.05f, 0.05f), PromptTestCatalog.SAMPLING_VARIANTS.map { it.temperature })
         assertEquals(listOf(20, 20, 20, 40, 20), PromptTestCatalog.SAMPLING_VARIANTS.map { it.topK })
         assertEquals(listOf(0.8f, 0.8f, 0.8f, 0.8f, 0.95f), PromptTestCatalog.SAMPLING_VARIANTS.map { it.topP })
-        assertEquals(32, variants.first().nUbatch)
-        assertEquals(64, variants[1].nUbatch)
-        assertEquals(4, variants[1].nThreads)
-        assertEquals(8, variants[1].nThreadsBatch)
-        assertEquals(4, variants[2].nThreads)
-        assertEquals(8, variants[2].nThreadsBatch)
-        assertEquals(BackendPreference.CPU_ONLY, variants[1].backendPreference)
-        assertEquals(BackendPreference.ACCELERATOR_REQUIRED, variants[2].backendPreference)
     }
 
     @Test

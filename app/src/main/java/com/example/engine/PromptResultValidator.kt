@@ -32,6 +32,14 @@ object PromptResultValidator {
                     "Erwartet: genau zwei Sätze mit Dokument und System; erkannt: $count."
                 )
             }
+            "TEST_PREFILL_256", "TEST_PREFILL_512" -> {
+                val passed = Regex("^OCR[.!]?$", RegexOption.IGNORE_CASE).matches(output)
+                PromptValidationResult(
+                    passed,
+                    if (passed) "Das erwartete OCR-Signal wurde nach dem langen Prefill ausgegeben."
+                    else "Erwartet wurde ausschließlich OCR als kurze Antwort auf den Prefill-Test."
+                )
+            }
             "TEST_TUNING", "TEST_SAMPLING" -> {
                 val relevant = output.contains("ocr", ignoreCase = true) ||
                     output.contains("text", ignoreCase = true) ||

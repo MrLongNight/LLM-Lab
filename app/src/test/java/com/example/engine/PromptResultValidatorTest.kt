@@ -53,4 +53,14 @@ class PromptResultValidatorTest {
         assertFalse(PromptResultValidator.validate(test("TEST_EXTRACTION"), wrongPo).passed)
         assertFalse(PromptResultValidator.validate(test("TEST_EXTRACTION"), wrongAmount).passed)
     }
+
+    @Test
+    fun prefillWorkflowsRequireTheExpectedOcrSignal() {
+        val relevant = "OCR"
+        val irrelevant = "BEREIT"
+        assertTrue(PromptResultValidator.validate(test("TEST_PREFILL_256"), relevant).passed)
+        assertTrue(PromptResultValidator.validate(test("TEST_PREFILL_512"), relevant).passed)
+        assertFalse(PromptResultValidator.validate(test("TEST_PREFILL_256"), irrelevant).passed)
+    }
+
 }

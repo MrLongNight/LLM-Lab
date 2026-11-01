@@ -9,7 +9,7 @@ Eigenständige Android-Test-App zur Untersuchung echter lokaler GGUF-Inferenz au
 - CPU ist immer als sicherer Fallback einkompiliert. Vulkan wird zusätzlich als generisches GPU-Backend gebaut; ob es auf einem Gerät initialisierbar ist, wird zur Laufzeit über die llama.cpp-Registry geprüft. CUDA/Metal sind auf Android nicht aktiviert. Hersteller-NPUs (z. B. Qualcomm QNN/Hexagon oder MediaTek NeuroPilot) benötigen jeweils eigene SDK-/Backend-Adapter und sind in diesem Build noch nicht enthalten.
 - GGUF-Modell wird über den Android-Dateiauswahldialog ausgewählt und vor dem nativen Laden in den internen App-Speicher kopiert. Das Modell ist nicht in der APK enthalten.
 - Eigenständige Package-ID: `de.mrlongnight.llmlab`; `minSdk=29` (Android 10), `targetSdk=36`, ABIs `arm64-v8a` und `x86_64`.
-- Keine Firebase-, Gemini-, Cloud-, Login- oder externen KI-API-Abhängigkeiten. Das Manifest fordert keine Internet-Berechtigung an und Android-App-Backup ist deaktiviert.
+- Keine Firebase-, Gemini-, Cloud-Inferenz-, Login- oder externen KI-API-Abhängigkeiten. Internetzugriff wird ausschließlich für vom Nutzer gestartete HTTPS-Downloads der Qwen-GGUF-Dateien von Hugging Face verwendet; die Inferenz läuft anschließend lokal. Android-App-Backup ist deaktiviert.
 
 Die App darf „Modell bereit“ erst anzeigen, wenn `llama_load_model_from_file` und `llama_new_context_with_model` erfolgreich zurückgekehrt sind. Bei fehlender nativer Bibliothek gibt es keinen JVM-Ersatzpfad. Die Backend-Registry meldet pro Backend Initialisierbarkeit und Abbruchfähigkeit. In der gepinnten llama.cpp-Version b11998 wird der sichere AUTO-Pfad auf CPU gehalten; Vulkan-Offload wird nur mit `ACCELERATOR_REQUIRED` erzwungen und bleibt wegen der fehlenden verlässlichen Abbruchgarantie ein experimenteller Testmodus.
 
@@ -35,7 +35,7 @@ Die GitHub-Actions-Pipeline führt dieselben beiden Gradle-Aufgaben aus und ver�
 3. In LLM Lab den Bereich **Modell** öffnen und die GGUF-Datei über den System-Dateiauswahldialog auswählen.
 4. Die angezeigte Datei-/GGUF-Information prüfen und **Initialisieren** starten.
 5. Erst bei Status **Modell bereit** den Kurztest im Prompt-Labor ausführen.
-6. Im Prompt-Labor einen der drei fachlichen Abläufe starten. Jeder vergleicht CPU-Referenz, CPU-Wide-Batch und Vulkan-Offload. Der vierte Ablauf **Hardware-Tuning** führt acht CPU-/Vulkan-Konfigurationen aus (Generation 2/4/6/8 Threads, 8 Prefill-Threads, ubatch 64/128). Der fünfte Ablauf **Sampling-Tuning** vergleicht fünf Varianten, bei denen Temperatur, Top-K und Top-P einzeln verändert werden. Danach optional den 3-fachen Stabilitätscheck ausführen.
+6. In der Modellverwaltung eines der vier Qwen-GGUF-Modelle herunterladen oder auswählen. Der Download kann fortgesetzt werden und wird vor der Verwendung per GGUF-Header und SHA-256 geprüft. **Quick-Check** schaltet alle vier Modelle einzeln durch. **Quick → Full** startet die vollständige Matrix nur, wenn jeder Quick-Check bestanden wurde. Im Prompt-Labor stehen sieben Einzelworkflows für Durchsatz, DMS, JSON-Extraktion, Vulkan-Hardware-Tuning, Sampling und zwei Prompt-Prefill-Längen bereit.
 7. Bei Fehlern TXT- und JSON-Diagnoseexport erzeugen. Chat-Prompt und Chat-Antwort werden in der lokalen Testhistorie redigiert gespeichert.
 
 ## Inferenzmesswerte
@@ -46,9 +46,9 @@ Der Prompt-Callback meldet Fortschritt während der Prompt-Auswertung. Während 
 
 ## Testprofile
 
-Für reproduzierbare Vergleiche hält jeder Workflow `n_ctx=2048`, `n_batch=512`, Temperatur `0.05`, Top-k `20` und Top-p `0.8` konstant. Die drei Testprofile variieren Backend, Threads und Micro-Batch: CPU-Referenz (AUTO, 4/8 Threads, `n_ubatch=32`), CPU-Wide-Batch (CPU_ONLY, 4/8 Threads, `n_ubatch=64`) und Vulkan-Offload (ACCELERATOR_REQUIRED, 4/8 Threads, `n_ubatch=64`). Die maximale Tokenzahl ist je Workflow begrenzt.
+Für reproduzierbare Vergleiche hält die Matrix `n_ctx=2048`, `n_batch=512` und die Sampling-Baseline konstant. Nur der Durchsatzworkflow enthält zwei Profile: eine CPU-only-Referenz (4/8 Threads, `n_ubatch=64`) und Vulkan-Offload (4/8 Threads, `n_ubatch=64`). DMS, JSON-Extraktion, Hardware-, Sampling- und beide Prefill-Workflows verlangen Vulkan über `ACCELERATOR_REQUIRED`; die maximale Tokenzahl und das Zeitlimit sind je Workflow begrenzt.
 
-Das Prompt-Labor bietet fünf automatische Workflows: (1) längere deutsche Antwort für Prefill-/Durchsatzmessung, (2) zweisätzige deutsche DMS-Erklärung, (3) synthetische Rechnungs-Extraktion mit sieben JSON-Feldern einschließlich `iban=null` und `poNumber=null`, (4) Hardware-Tuning mit acht CPU-/Vulkan-Profilen, (5) Sampling-Tuning mit fünf Varianten. Beim Hardware-Tuning werden CPU-Generierung 2/4/6/8 Threads (Prefill konstant 8), CPU-ubatch 64/128 sowie Vulkan 4/8 Threads und ubatch 64/128 verglichen. Beim Sampling-Tuning bleibt das Vulkan-8/8-Profil konstant; Temperatur, Top-K und Top-P werden einzeln gegenüber der Baseline verändert. Die ursprüngliche Modellkonfiguration wird anschließend wiederhergestellt. Bei CPU-zu-CPU-Profilwechseln wird nur der llama_context neu aufgebaut; die mmap-gemappten GGUF-Gewichte bleiben geladen. Nur ein Wechsel der CPU-/Vulkan-Gewichtplatzierung lädt das GGUF erneut.
+Das Prompt-Labor bietet sieben Workflows: (1) längere deutsche Antwort für Durchsatz, (2) zweisätzige DMS-Erklärung, (3) synthetische Rechnungs-Extraktion mit sieben JSON-Feldern einschließlich `iban=null` und `poNumber=null`, (4) Vulkan-Hardware-Tuning mit fünf Profilen (2/4/6/8 Threads sowie zusätzlich ubatch 128), (5) Sampling-Tuning mit fünf Varianten, (6) mittleres und (7) langes Prompt-Prefill mit jeweils drei Vulkan-ubatch-Profilen (32/64/128). Beim Sampling-Tuning bleibt Vulkan aktiv; Temperatur, Top-K und Top-P werden einzeln gegenüber der Baseline verändert. Die ursprüngliche Modellkonfiguration wird anschließend wiederhergestellt.
 
 Sampling-Parameter bleiben innerhalb eines Dreiervergleichs identisch, damit Unterschiede primär auf Backend, Threads und Micro-Batch zurückgeführt werden können. Native llama.cpp-Kernel werden auch im Debug-APK mit `-O3` kompiliert.
 
@@ -67,8 +67,8 @@ Ein grüner GitHub-Actions-Lauf beweist nur, dass die Android-App und die native
 Vor Übergabe an `myDocAnizer-Mobile` sind auf dem tatsächlichen Smartphone mindestens folgende Punkte zu protokollieren:
 
 - [ ] Modellinitialisierung mit dem angegebenen Qwen-GGUF erfolgreich, Status erst danach `Modell bereit`.
-- [ ] Alle fünf automatischen Workflows laufen auf dem Smartphone; acht Hardware-Profile und fünf Sampling-Profile werden mit den tatsächlich geladenen Parametern und Messwerten dokumentiert.
-- [ ] CPU-Referenz, CPU-Wide-Batch und Vulkan-Offload sind anhand tatsächlicher Ladeprotokolle und nicht nur der Backend-Auswahl verglichen.
+- [ ] Alle sieben automatischen Workflows laufen auf dem Smartphone; fünf Vulkan-Hardwareprofile, je drei Prefill-Profile und fünf Sampling-Profile werden mit den tatsächlich geladenen Parametern und Messwerten dokumentiert.
+- [ ] Die eine CPU-Referenz und Vulkan-Offload sind anhand tatsächlicher Ladeprotokolle und nicht nur der Backend-Auswahl verglichen; die Full-Routine enthält keine redundanten CPU-only-Tuningläufe.
 - [ ] Deutsche DMS-Antwort und Extraktion erfüllen ihre inhaltlichen Validatoren.
 - [ ] Tokenisierung, Prompt-Eval und Generierung zeigen plausible native Messwerte.
 - [ ] Manueller Abbruch und jede Timeout-Klasse kehren innerhalb der festgelegten Grenzen zurück.
@@ -77,3 +77,26 @@ Vor Übergabe an `myDocAnizer-Mobile` sind auf dem tatsächlichen Smartphone min
 - [ ] TXT- und JSON-Export sind auf dem Smartphone erzeugt und enthalten Modell-/Engine-Version, Parameter und Testresultate.
 
 Bis diese Zielgerätetests durchgeführt und dokumentiert sind, ist der Prototyp **buildfähig mit integrierter llama.cpp-Engine**, aber noch nicht als auf dem Smartphone funktionsfähig abgenommen.
+
+## Hugging Face: Qwen-Modellmatrix
+
+Die Modellverwaltung bietet vier direkt auswählbare GGUF-Dateien aus den offiziellen Hugging-Face-Repositories von Qwen:
+
+| Parameter | Quantisierung | Datei |
+|---|---|---|
+| 0.5B | Q4_0 | `qwen2.5-0.5b-instruct-q4_0.gguf` |
+| 0.5B | Q4_K_M | `qwen2.5-0.5b-instruct-q4_k_m.gguf` |
+| 1.5B | Q4_0 | `qwen2.5-1.5b-instruct-q4_0.gguf` |
+| 1.5B | Q4_K_M | `qwen2.5-1.5b-instruct-q4_k_m.gguf` |
+
+Downloads laufen auf ausdrücklichen Tastendruck in den dauerhaften App-internen Ordner `filesDir/models`. Es gibt keine zweite vollständige Kopie als `active_model.gguf`. Unterbrochene Downloads werden über eine `.part`-Datei fortgesetzt. Vor der Freigabe werden GGUF-Header, Tensoranzahl und SHA-256 gegen den im Modellkatalog hinterlegten Hugging-Face-Wert geprüft. Die Inferenz danach erfolgt vollständig lokal.
+
+### Automatische Testreihe
+
+- Quick-Preflight lädt jedes der vier Modelle nacheinander, verlangt das Vulkan-Backend, mindestens eine nachgewiesene GPU-Layer-Zuordnung und eine erfolgreich abgeschlossene Kurzantwort.
+- Die Full-Routine startet nur, wenn alle vier Quick-Checks bestanden wurden.
+- Die Full-Routine umfasst sieben Workflows und 20 Einzelprofile je Modell (80 Gesamtprofile): Durchsatz (eine CPU-Referenz plus Vulkan), deutsche Instruktion, JSON-Extraktion, fünf Vulkan-Hardwareprofile, zwei Prefill-Längen mit jeweils drei Vulkan-ubatch-Profilen und fünf Vulkan-Samplingprofile.
+- CPU-only wird damit nur einmal pro Modell als Referenz gemessen. Die restlichen 76 Full-Profile sowie alle Quick-Checks laufen mit zwingend angefordertem Vulkan-Backend.
+- Nach der Testreihe wird das zuvor ausgewählte Modell und dessen Konfiguration wiederhergestellt.
+
+Die Prefill-Längen sind reproduzierbare Näherungswerte, keine vom Modelltokenizer exakt garantierten Tokenzahlen. Ein Vulkan-Backendname allein gilt nicht als Quick-Erfolg: Die Suite kontrolliert zusätzlich das native Modell-Ladelog auf echte GPU-Layer-Zuordnungen.

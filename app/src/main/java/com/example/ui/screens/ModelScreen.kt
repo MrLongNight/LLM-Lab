@@ -23,6 +23,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.engine.ProfilePreset
+import com.example.engine.HuggingFaceModelCatalog
 import com.example.ui.LLMLabViewModel
 import com.example.ui.ModelLifecycleState
 import com.example.ui.theme.*
@@ -31,6 +32,9 @@ import com.example.ui.theme.*
 fun ModelScreen(viewModel: LLMLabViewModel) {
     val modelState by viewModel.modelState.collectAsState()
     val config by viewModel.config.collectAsState()
+    val downloadedModelIds by viewModel.downloadedModelIds.collectAsState()
+    val huggingFaceDownload by viewModel.huggingFaceDownload.collectAsState()
+    val automatedSuite by viewModel.automatedSuite.collectAsState()
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -100,6 +104,16 @@ fun ModelScreen(viewModel: LLMLabViewModel) {
         // Status-Karte
         StatusDisplayCard(modelState = modelState)
 
+        HuggingFaceModelsCard(
+            viewModel = viewModel,
+            downloadedModelIds = downloadedModelIds,
+            downloadState = huggingFaceDownload,
+            suiteState = automatedSuite,
+            onQuickCheck = { viewModel.runQwenQuickCheck() },
+            onQuickThenFull = { viewModel.runQwenQuickThenFull() },
+            onCancelSuite = { viewModel.requestAbort() }
+        )
+
         // Dateiauswahl & Aktionen
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -130,6 +144,7 @@ fun ModelScreen(viewModel: LLMLabViewModel) {
                     Button(
                         onClick = { filePicker.launch(arrayOf("*/*")) },
                         colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
+                        enabled = !automatedSuite.isRunning,
                         modifier = Modifier
                             .weight(1f)
                             .testTag("select_model_file_button")
@@ -308,6 +323,159 @@ fun ModelScreen(viewModel: LLMLabViewModel) {
             }
 
             else -> {}
+        }
+    }
+}
+
+@Composable
+private fun HuggingFaceModelsCard(
+    viewModel: LLMLabViewModel,
+    downloadedModelIds: Set<String>,
+    downloadState: com.example.ui.HuggingFaceDownloadUiState,
+    suiteState: com.example.ui.AutomatedModelSuiteUiState,
+    onQuickCheck: () -> Unit,
+    onQuickThenFull: () -> Unit,
+    onCancelSuite: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, NeonCyan.copy(alpha = 0.45f))
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text("QWEN-MODELLE VON HUGGING FACE", color = NeonCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+            Text("Direkt herunterladen und lokal verwenden", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                "Vier offizielle Qwen2.5-Instruct-GGUF-Dateien für den kontrollierten Vergleich von 0.5B/1.5B und Q4_0/Q4_K_M. Alle vier benötigen zusammen rund 3,1 GB Speicher. Download nur auf ausdrücklichen Tastendruck; danach läuft die Inferenz lokal. Lizenz: Apache-2.0.",
+                color = TextSecondary,
+                fontSize = 12.sp
+            )
+
+            HuggingFaceModelCatalog.models.forEach { model ->
+                val downloaded = model.id in downloadedModelIds
+                val isActiveDownload = downloadState.modelId == model.id && downloadState.isDownloading
+                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("${model.parameters} · ${model.quantization}", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            Text("${model.title} · ${model.sizeLabel}", color = TextSecondary, fontSize = 11.sp)
+                        }
+                        Button(
+                            onClick = {
+                                when {
+                                    isActiveDownload -> viewModel.cancelHuggingFaceDownload()
+                                    downloaded -> viewModel.selectDownloadedHuggingFaceModel(model.id)
+                                    else -> viewModel.downloadHuggingFaceModel(model.id)
+                                }
+                            },
+                            enabled = !suiteState.isRunning && (isActiveDownload || downloaded || !downloadState.isDownloading),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isActiveDownload) LaserCrimson else if (downloaded) MatrixGreen else NeonCyan,
+                                contentColor = Color.Black,
+                                disabledContainerColor = DarkSurfaceVariant,
+                                disabledContentColor = TextMuted
+                            ),
+                            modifier = Modifier.testTag("hf_model_${model.id}")
+                        ) {
+                            Text(
+                                when {
+                                    isActiveDownload -> "Abbrechen"
+                                    downloaded -> "Auswählen"
+                                    else -> "Download"
+                                },
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+
+                    if (isActiveDownload) {
+                        val progress = if (downloadState.totalBytes > 0L) {
+                            (downloadState.downloadedBytes.toFloat() / downloadState.totalBytes.toFloat()).coerceIn(0f, 1f)
+                        } else 0f
+                        LinearProgressIndicator(
+                            progress = { progress },
+                            modifier = Modifier.fillMaxWidth().height(6.dp),
+                            color = NeonCyan,
+                            trackColor = DarkSurfaceVariant
+                        )
+                        Text(
+                            "${downloadState.downloadedBytes / (1024L * 1024L)} MB / ${if (downloadState.totalBytes > 0L) "${downloadState.totalBytes / (1024L * 1024L)} MB" else "Größe wird ermittelt"}",
+                            color = TextSecondary,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    if (downloadState.modelId == model.id) {
+                        downloadState.message?.let { Text(it, color = if (downloadState.error == null) TextSecondary else LaserCrimson, fontSize = 11.sp) }
+                        downloadState.error?.let { Text(it, color = LaserCrimson, fontSize = 12.sp) }
+                    }
+                }
+                if (model != HuggingFaceModelCatalog.models.last()) {
+                    HorizontalDivider(color = DarkCardBorder)
+                }
+            }
+
+            HorizontalDivider(color = DarkCardBorder)
+            Text("AUTOMATISCHER MODELLVERGLEICH", color = NeonCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+            Text(
+                "Die App schaltet nacheinander alle vier Modelle durch. Der Quick-Preflight prüft Modellladen, echte Vulkan-Layer-Zuordnung und eine kurze Inferenz. Nur wenn alle vier Modelle bestehen, startet die Full-Routine automatisch.",
+                color = TextSecondary,
+                fontSize = 12.sp
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = onQuickCheck,
+                    enabled = !suiteState.isRunning,
+                    modifier = Modifier.weight(1f).testTag("qwen_quick_check_button")
+                ) {
+                    Text("Quick-Check", fontSize = 11.sp)
+                }
+                Button(
+                    onClick = onQuickThenFull,
+                    enabled = !suiteState.isRunning,
+                    colors = ButtonDefaults.buttonColors(containerColor = MatrixGreen, contentColor = Color.Black),
+                    modifier = Modifier.weight(1f).testTag("qwen_quick_full_button")
+                ) {
+                    Text("Quick → Full", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            if (suiteState.isRunning || suiteState.phase != "IDLE") {
+                Text(
+                    "${suiteState.phase} · Modell ${suiteState.currentModelIndex}/${suiteState.modelCount} · Quick bestanden: ${suiteState.quickPassed}/${suiteState.modelCount} · Full: ${suiteState.fullTestsCompleted}/${suiteState.fullTestsTotal}",
+                    color = if (suiteState.error == null) NeonCyan else LaserCrimson,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                if (suiteState.isRunning) {
+                    LinearProgressIndicator(
+                        progress = {
+                            when {
+                                suiteState.fullTestsTotal > 0 -> suiteState.fullTestsCompleted.toFloat() / suiteState.fullTestsTotal.toFloat()
+                                suiteState.modelCount > 0 -> suiteState.quickPassed.toFloat() / suiteState.modelCount.toFloat()
+                                else -> 0f
+                            }.coerceIn(0f, 1f)
+                        },
+                        modifier = Modifier.fillMaxWidth().height(6.dp),
+                        color = NeonCyan,
+                        trackColor = DarkSurfaceVariant
+                    )
+                    Text(suiteState.message, color = TextSecondary, fontSize = 11.sp)
+                    OutlinedButton(onClick = onCancelSuite, modifier = Modifier.fillMaxWidth()) {
+                        Text("Testreihe abbrechen", color = LaserCrimson)
+                    }
+                } else {
+                    Text(suiteState.message, color = if (suiteState.error == null) MatrixGreen else LaserCrimson, fontSize = 11.sp)
+                    suiteState.error?.let { Text(it, color = LaserCrimson, fontSize = 11.sp) }
+                }
+            }
         }
     }
 }

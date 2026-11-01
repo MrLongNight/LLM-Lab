@@ -13,6 +13,9 @@ import com.example.data.TestRunEntity
 import com.example.engine.ExportManager
 import com.example.engine.GgufInfo
 import com.example.engine.GgufMetadataParser
+import com.example.engine.HuggingFaceModelCatalog
+import com.example.engine.HuggingFaceModelDownloader
+import com.example.engine.AutomatedModelSuitePlan
 import com.example.engine.BackendPreference
 import com.example.engine.NativeBackendInfo
 import com.example.engine.InferenceCallback
@@ -26,6 +29,7 @@ import com.example.engine.PromptTestCase
 import com.example.engine.InferenceTestVariant
 import com.example.engine.SystemTelemetry
 import com.example.engine.SystemTelemetryManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -43,6 +47,29 @@ import java.io.InterruptedIOException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.text.DecimalFormat
+
+data class HuggingFaceDownloadUiState(
+    val modelId: String? = null,
+    val downloadedBytes: Long = 0L,
+    val totalBytes: Long = 0L,
+    val isDownloading: Boolean = false,
+    val message: String? = null,
+    val error: String? = null
+)
+
+data class AutomatedModelSuiteUiState(
+    val isRunning: Boolean = false,
+    val phase: String = "IDLE",
+    val currentModelIndex: Int = 0,
+    val modelCount: Int = 0,
+    val currentModelName: String = "",
+    val quickPassed: Int = 0,
+    val quickFailed: Int = 0,
+    val fullTestsCompleted: Int = 0,
+    val fullTestsTotal: Int = 0,
+    val message: String = "",
+    val error: String? = null
+)
 
 data class ChatMessage(
     val id: String = java.util.UUID.randomUUID().toString(),
@@ -109,6 +136,14 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     private val db = AppDatabase.getInstance(application)
     private val dao = db.testRunDao()
     private val nativeBridge = LlamaNativeBridge(application.applicationInfo.nativeLibraryDir)
+    private val huggingFaceDownloader = HuggingFaceModelDownloader(application)
+    private val _downloadedModelIds = MutableStateFlow<Set<String>>(emptySet())
+    val downloadedModelIds: StateFlow<Set<String>> = _downloadedModelIds.asStateFlow()
+    private val _huggingFaceDownload = MutableStateFlow(HuggingFaceDownloadUiState())
+    val huggingFaceDownload: StateFlow<HuggingFaceDownloadUiState> = _huggingFaceDownload.asStateFlow()
+    private val _automatedSuite = MutableStateFlow(AutomatedModelSuiteUiState())
+    val automatedSuite: StateFlow<AutomatedModelSuiteUiState> = _automatedSuite.asStateFlow()
+    private var huggingFaceDownloadJob: Job? = null
 
     private val _currentTab = MutableStateFlow(0)
     val currentTab: StateFlow<Int> = _currentTab.asStateFlow()
@@ -160,6 +195,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     private var activeInferenceJob: Job? = null
     @Volatile private var engineOperationGeneration: Long = 0L
     private val nativeEngineUnresponsive = AtomicBoolean(false)
+    private val automatedSuiteAbortRequested = AtomicBoolean(false)
     private val nativeCallInProgress = AtomicBoolean(false)
     private val nativeCallGeneration = AtomicLong(0L)
 
@@ -178,11 +214,14 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     }
     private var localCachedModelUri: Uri? = null
     private var lastModelSelection: ModelLifecycleState.ModelSelected? = null
+    /** Active GGUF path used by llama.cpp; differs for managed HF downloads and user imports. */
+    private var activeModelFile: File? = null
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
             _availableBackends.value = nativeBridge.getBackendInfo()
         }
+        refreshDownloadedModels()
         // Starte periodische Telemetrieerfassung
         viewModelScope.launch(Dispatchers.Default) {
             while (true) {
@@ -341,17 +380,27 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 var fileName = "Unbekanntes GGUF-Modell"
                 var fileSize = 0L
 
-                context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                    val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
-                    if (cursor.moveToFirst()) {
-                        if (nameIndex != -1) fileName = cursor.getString(nameIndex) ?: fileName
-                        if (sizeIndex != -1) fileSize = cursor.getLong(sizeIndex)
+                val directFile = if (uri.scheme == "file") {
+                    File(uri.path ?: throw IOException("Lokaler Modellpfad fehlt."))
+                } else null
+                if (directFile != null) {
+                    if (!directFile.isFile) throw IOException("Lokale Modell-Datei existiert nicht: ${directFile.name}")
+                    fileName = directFile.name
+                    fileSize = directFile.length()
+                } else {
+                    context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                        val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                        if (cursor.moveToFirst()) {
+                            if (nameIndex != -1) fileName = cursor.getString(nameIndex) ?: fileName
+                            if (sizeIndex != -1) fileSize = cursor.getLong(sizeIndex)
+                        }
                     }
                 }
 
                 // GGUF-Header und Metadaten vor dem Modellladen prüfen.
-                val ggufInfo = GgufMetadataParser.parse(context, uri, fileSize)
+                val ggufInfo = directFile?.let { GgufMetadataParser.parse(it) }
+                    ?: GgufMetadataParser.parse(context, uri, fileSize)
                 if (!ggufInfo.isValid) {
                     _modelState.value = ModelLifecycleState.Error(
                         ggufInfo.errorMessage ?: "Ungültige GGUF-Datei"
@@ -371,6 +420,86 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 _modelState.value = ModelLifecycleState.Error("Fehler bei Modellauswahl: ${e.message}")
             }
         }
+    }
+
+    fun refreshDownloadedModels() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val modelDirectory = File(getApplication<Application>().filesDir, "models")
+            _downloadedModelIds.value = HuggingFaceModelCatalog.models
+                .filter { model ->
+                    val file = File(modelDirectory, model.filename)
+                    file.isFile && file.length() >= (model.estimatedSizeBytes * 0.85).toLong()
+                }
+                .map { it.id }
+                .toSet()
+        }
+    }
+
+    fun selectDownloadedHuggingFaceModel(modelId: String) {
+        val model = HuggingFaceModelCatalog.find(modelId) ?: return
+        val file = File(File(getApplication<Application>().filesDir, "models"), model.filename)
+        if (!file.isFile || file.length() <= 0L) {
+            refreshDownloadedModels()
+            _huggingFaceDownload.value = HuggingFaceDownloadUiState(
+                modelId = modelId,
+                error = "Die lokale Modell-Datei wurde nicht gefunden. Bitte erneut herunterladen."
+            )
+            return
+        }
+        onModelFileSelected(Uri.fromFile(file))
+    }
+
+    fun downloadHuggingFaceModel(modelId: String) {
+        val model = HuggingFaceModelCatalog.find(modelId) ?: return
+        if (huggingFaceDownloadJob?.isActive == true) return
+
+        huggingFaceDownloadJob = viewModelScope.launch(Dispatchers.IO) {
+            _huggingFaceDownload.value = HuggingFaceDownloadUiState(
+                modelId = model.id,
+                isDownloading = true,
+                message = "Verbinde mit Hugging Face…"
+            )
+            try {
+                val file = huggingFaceDownloader.download(model) { downloaded, total ->
+                    _huggingFaceDownload.value = HuggingFaceDownloadUiState(
+                        modelId = model.id,
+                        downloadedBytes = downloaded,
+                        totalBytes = total,
+                        isDownloading = true,
+                        message = if (total > 0L && downloaded >= total) "Prüfe SHA-256 und GGUF-Header…" else "Download von Hugging Face läuft…"
+                    )
+                }
+                _downloadedModelIds.value = _downloadedModelIds.value + model.id
+                _huggingFaceDownload.value = HuggingFaceDownloadUiState(
+                    modelId = model.id,
+                    downloadedBytes = file.length(),
+                    totalBytes = file.length(),
+                    isDownloading = false,
+                    message = "Download und SHA-256-Prüfung erfolgreich. Modell ist lokal verfügbar."
+                )
+                onModelFileSelected(Uri.fromFile(file))
+            } catch (cancelled: CancellationException) {
+                _huggingFaceDownload.value = HuggingFaceDownloadUiState(
+                    modelId = model.id,
+                    isDownloading = false,
+                    message = "Download abgebrochen. Der bisherige Fortschritt bleibt zum Fortsetzen erhalten."
+                )
+                throw cancelled
+            } catch (error: Exception) {
+                _huggingFaceDownload.value = HuggingFaceDownloadUiState(
+                    modelId = model.id,
+                    isDownloading = false,
+                    message = "Download fehlgeschlagen.",
+                    error = error.message ?: "Unbekannter Download-Fehler"
+                )
+            } finally {
+                refreshDownloadedModels()
+            }
+        }
+    }
+
+    fun cancelHuggingFaceDownload() {
+        huggingFaceDownloadJob?.cancel()
     }
 
     fun initializeModel() {
@@ -398,11 +527,22 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 val context = getApplication<Application>()
                 // filesDir statt cacheDir: Das Betriebssystem darf das große Modell
                 // nicht wie einen entbehrlichen Cache-Eintrag entfernen.
-                val cacheModel = File(context.filesDir, "active_model.gguf")
+                val managedModelsDir = File(context.filesDir, "models")
+                val selectedLocalFile = if (selected.uri.scheme == "file") {
+                    selected.uri.path?.let { path -> File(path) }
+                } else null
+                val selectedManagedFile = selectedLocalFile?.takeIf { candidate ->
+                    candidate.isFile &&
+                        candidate.canonicalPath.startsWith(managedModelsDir.canonicalPath + File.separator)
+                }
+                // Hugging-Face-Modelle bleiben an ihrem dauerhaften Speicherort. So vermeiden
+                // wir eine zweite 0.5–1.1-GB-Kopie unter active_model.gguf.
+                val cacheModel = selectedManagedFile ?: File(context.filesDir, "active_model.gguf")
                 val cachePart = File(context.filesDir, "active_model.gguf.part")
-                val canReuse = localCachedModelUri == selected.uri &&
-                    cacheModel.isFile &&
-                    (selected.fileSizeBytes <= 0L || cacheModel.length() == selected.fileSizeBytes)
+                val canReuse = selectedManagedFile != null ||
+                    (localCachedModelUri == selected.uri &&
+                        cacheModel.isFile &&
+                        (selected.fileSizeBytes <= 0L || cacheModel.length() == selected.fileSizeBytes))
 
                 if (!canReuse) {
                     cachePart.delete()
@@ -469,6 +609,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 }
 
                 localCachedModelUri = selected.uri
+                activeModelFile = cacheModel
 
                 _modelState.value = ModelLifecycleState.Initializing(
                     null, "Lade Modell und erstelle llama.cpp Context...", System.currentTimeMillis() - startTime
@@ -694,16 +835,19 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun requestAbort() {
+        val suiteRunning = _automatedSuite.value.isRunning
+        if (suiteRunning) automatedSuiteAbortRequested.set(true)
         engineOperationGeneration++
-        if (activeInferenceJob?.isActive == true) {
-            // Das Signal läuft unabhängig vom Coroutine-Thread direkt zum nativen
-            // Abort-Flag und wird dort während llama_decode geprüft.
-            _modelState.value = ModelLifecycleState.Aborting
+        val runningInference = activeInferenceJob?.takeIf { it.isActive }
+        if (runningInference != null || suiteRunning) {
+            // Auch während Download oder Modellwechsel muss die Suite den Abbruch sehen.
             nativeBridge.requestAbort()
-            monitorNativeAbortResponsiveness(activeInferenceJob, "Manueller Abbruch")
+            if (runningInference != null) {
+                _modelState.value = ModelLifecycleState.Aborting
+                monitorNativeAbortResponsiveness(runningInference, "Manueller Abbruch")
+            }
         }
-        // Kein Job.cancel(): Ein blockierender JNI-Aufruf wird nur durch das
-        // native Abort-Signal beendet. Die Operation räumt sich selbst auf.
+        // Kein Job.cancel(): JNI wird über das native Abort-Flag beendet.
     }
 
     fun resetChat() {
@@ -730,7 +874,8 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
         baseReady: ModelLifecycleState.Ready,
         config: InferenceConfig
     ): PreparedTestProfile? {
-        val cacheModel = File(getApplication<Application>().filesDir, "active_model.gguf")
+        val cacheModel = activeModelFile
+            ?: File(getApplication<Application>().filesDir, "active_model.gguf")
         if (!cacheModel.isFile || cacheModel.length() <= 0L) {
             _modelState.value = ModelLifecycleState.Error(
                 "Die interne Modellkopie fehlt. Bitte das GGUF-Modell erneut initialisieren."
@@ -894,19 +1039,25 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             _labTestOutput.value = "Context-Parameter geändert. Bitte das Modell im Bereich Modell erneut laden, bevor ein Vergleich startet."
             return
         }
-
         launchEngineOperation {
-            val variants = when (testCase.id) {
-                "TEST_TUNING" -> PromptTestCatalog.TUNING_VARIANTS
-                "TEST_SAMPLING" -> PromptTestCatalog.SAMPLING_VARIANTS
-                else -> PromptTestCatalog.PARAMETER_VARIANTS
-            }
+            runLabTestInternal(testCase, originalReady, originalConfig)
+        }
+    }
+
+    private suspend fun runLabTestInternal(
+        testCase: PromptTestCase,
+        originalReady: ModelLifecycleState.Ready,
+        originalConfig: InferenceConfig
+    ): Boolean {
+
+            val variants = AutomatedModelSuitePlan.variantsFor(testCase)
             _labActiveTest.value = testCase
             _labTestOutput.value = "Automatischer Vergleich gestartet: ${variants.size} native Profile × 1 Test."
             _labMetrics.value = null
             lastWorkflowBackendReport = ""
             val summaries = mutableListOf<String>()
             val backendEvidence = StringBuilder()
+            var allSucceeded = true
             var currentReady: ModelLifecycleState.Ready? = originalReady
 
             for ((index, variant) in variants.withIndex()) {
@@ -953,6 +1104,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     backendEvidence.appendLine(error)
                     backendEvidence.appendLine(nativeBridge.getModelLoadLog())
                     backendEvidence.appendLine()
+                    allSucceeded = false
                     summaries += "Profil ${index + 1}/${variants.size} – ${variant.label}: FEHLGESCHLAGEN – $error"
                     currentReady = null
                     continue
@@ -1038,6 +1190,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                         metrics.generatedTokens > 0
                 val validation = PromptResultValidator.validate(testCase, response)
                 val succeeded = inferenceCompleted && validation.passed
+                if (!succeeded) allSucceeded = false
                 val error = PromptResultValidator.failureReason(metrics.errorMessage, inferenceCompleted, validation)
                 val actualBackend = nativeBridge.getActiveBackendName()
 
@@ -1096,6 +1249,436 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             _labActiveTest.value = null
+            return allSucceeded && !nativeEngineUnresponsive.get()
+    }
+
+    private suspend fun loadModelForAutomatedSuite(
+        file: File,
+        config: InferenceConfig
+    ): ModelLifecycleState.Ready? {
+        if (!file.isFile || file.length() <= 0L) {
+            _automatedSuite.value = _automatedSuite.value.copy(error = "Modell-Datei fehlt oder ist leer: ${file.name}")
+            return null
+        }
+        val info = GgufMetadataParser.parse(file)
+        if (!info.isValid || info.tensorCount <= 0L) {
+            _automatedSuite.value = _automatedSuite.value.copy(
+                error = "GGUF-Prüfung fehlgeschlagen für ${file.name}: ${info.errorMessage ?: "ungültiger Header"}"
+            )
+            return null
+        }
+
+        // llama.cpp is switched serially: unload first, then load the next GGUF file.
+        nativeBridge.unloadModel()
+        nativeBridge.prepareForOperation()
+        _modelState.value = ModelLifecycleState.Initializing(
+            null, "Automatischer Modellwechsel: ${file.name} wird geladen…", 0
+        )
+        val startedAt = SystemClock.elapsedRealtime()
+        val timeout = config.timeoutInitSec.coerceAtLeast(1)
+        val timedOut = AtomicBoolean(false)
+        val watchdog = viewModelScope.launch(Dispatchers.Default) {
+            delay(timeout * 1000L)
+            timedOut.set(true)
+            nativeBridge.requestAbort()
+            monitorNativeAbortResponsiveness(activeInferenceJob, "Automatischer Qwen-Modellwechsel")
+        }
+        try {
+            val errors = arrayOfNulls<String>(1)
+            val loaded = try {
+                beginNativeCall()
+                nativeBridge.loadModel(file.absolutePath, config, errors)
+            } finally {
+                endNativeCall()
+            }
+            if (timedOut.get() || nativeBridge.isAbortRequested()) {
+                if (loaded) nativeBridge.unloadModel()
+                _modelState.value = ModelLifecycleState.Error(
+                    if (timedOut.get()) "TIMEOUT: ${file.name} konnte nicht innerhalb von $timeout Sekunden geladen werden."
+                    else "Modellwechsel zu ${file.name} wurde abgebrochen."
+                )
+                return null
+            }
+            if (!loaded) {
+                _modelState.value = ModelLifecycleState.Error(errors[0] ?: "llama.cpp konnte ${file.name} nicht laden.")
+                return null
+            }
+
+            val selection = ModelLifecycleState.ModelSelected(
+                uri = Uri.fromFile(file),
+                fileName = file.name,
+                fileSizeBytes = file.length(),
+                ggufInfo = info
+            )
+            lastModelSelection = selection
+            localCachedModelUri = selection.uri
+            activeModelFile = file
+            _config.value = config
+            val ready = ModelLifecycleState.Ready(
+                fileName = file.name,
+                fileSizeBytes = file.length(),
+                ggufInfo = info,
+                initDurationMs = SystemClock.elapsedRealtime() - startedAt,
+                engineVersion = nativeBridge.getEngineVersion(),
+                loadedConfig = config,
+                activeBackendName = nativeBridge.getActiveBackendName()
+            )
+            _modelState.value = ready
+            return ready
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            _modelState.value = ModelLifecycleState.Error(
+                "Modellwechsel zu ${file.name} fehlgeschlagen: ${error.message ?: error.javaClass.simpleName}"
+            )
+            return null
+        } finally {
+            watchdog.cancel()
+        }
+    }
+
+    private suspend fun runQuickModelCheck(
+        model: com.example.engine.HuggingFaceModel,
+        ready: ModelLifecycleState.Ready,
+        config: InferenceConfig,
+        modelIndex: Int,
+        modelCount: Int
+    ): Boolean {
+        val prompt = AutomatedModelSuitePlan.quickPrompt
+        val testCase = PromptTestCase(
+            id = "AUTO_QUICK_CHECK",
+            title = "Automatischer Qwen-Quick-Check",
+            description = "Prüft Modellinitialisierung, Vulkan-Offload und kurze Token-Generierung.",
+            prompt = prompt,
+            expectedKeywords = listOf("BEREIT"),
+            maxTokens = 12,
+            timeoutSec = 90
+        )
+        val loadLog = nativeBridge.getModelLoadLog()
+        val gpuWeightLayerCount = loadLog.lineSequence().count { line ->
+            line.contains("load_tensors: layer", ignoreCase = true) &&
+                line.contains("assigned to device Vulkan", ignoreCase = true)
+        }
+        val backendName = ready.activeBackendName
+        val localText = StringBuilder()
+        _labActiveTest.value = testCase
+        _automatedSuite.value = _automatedSuite.value.copy(
+            phase = "QUICK_INFERENCE",
+            currentModelIndex = modelIndex,
+            currentModelName = "${model.title} · ${model.parameters} · ${model.quantization}",
+            message = "Quick-Check: Vulkan-Backend, GPU-Offload und Inferenz prüfen…"
+        )
+        val callback = object : InferenceCallback {
+            override fun onToken(tokenText: String, tokenIndex: Int) {
+                localText.append(tokenText)
+                _labTestOutput.value = "Quick-Check $modelIndex/$modelCount – ${model.filename}\n$localText"
+            }
+            override fun onProgress(progressPercent: Float, step: Int) {
+                _labTestOutput.value = "Quick-Check $modelIndex/$modelCount – ${model.filename}\nPrefill: ${progressPercent.toInt()}%"
+            }
+        }
+        val quickConfig = config.copy(maxTokens = 12)
+        val metrics = executeInferenceWithWatchdog(prompt, quickConfig, callback, testCase.timeoutSec)
+        val passed = AutomatedModelSuitePlan.quickCheckPassed(
+            activeBackendName = backendName,
+            gpuWeightLayerCount = gpuWeightLayerCount,
+            finishReason = metrics.finishReason,
+            generatedTokens = metrics.generatedTokens,
+            response = localText.toString()
+        )
+        val errors = buildList {
+            if (!backendName.contains("Vulkan", ignoreCase = true)) add("Aktives Backend ist nicht Vulkan: $backendName")
+            if (gpuWeightLayerCount <= 0) add("Keine explizite Vulkan-Layer-Zuordnung im Modell-Lade-Log.")
+            if (metrics.finishReason !in listOf("STOP_TOKEN", "MAX_TOKENS") || metrics.generatedTokens <= 0) {
+                add("Inferenz nicht sauber abgeschlossen: ${metrics.finishReason} ${metrics.errorMessage.orEmpty()}")
+            }
+            if (!passed && isEmpty()) add("Die Quick-Antwort entsprach nicht exakt BEREIT.")
+        }
+        val resultText = if (passed) {
+            "BESTANDEN: ${model.filename} · Vulkan · $gpuWeightLayerCount GPU-Layer · ${metrics.tokensPerSecond} Tok/s"
+        } else {
+            "FEHLGESCHLAGEN: ${model.filename}\n${errors.joinToString("\n")}\nAntwort: ${localText.toString().take(120)}"
+        }
+        persistWorkflowRun(
+            testCase = testCase,
+            variant = InferenceTestVariant(
+                id = "VULKAN_QUICK",
+                label = "Vulkan Quick-Check",
+                nBatch = config.nBatch,
+                nUbatch = config.nUbatch,
+                nThreads = config.nThreads,
+                nThreadsBatch = config.nThreadsBatch,
+                backendPreference = config.backendPreference
+            ),
+            config = quickConfig,
+            metrics = metrics,
+            response = localText.toString(),
+            activeBackend = backendName,
+            succeeded = passed,
+            error = errors.takeIf { it.isNotEmpty() }?.joinToString(" "),
+            profileSetupDurationMs = ready.initDurationMs,
+            profileSetupMode = "FULL_MODEL_LOAD_FOR_QUICK_CHECK"
+        )
+        _labTestOutput.value = resultText
+        _labActiveTest.value = null
+        return passed
+    }
+
+    fun runQwenQuickCheck() = runQwenModelSuite(runFullAfterQuickCheck = false)
+
+    fun runQwenQuickThenFull() = runQwenModelSuite(runFullAfterQuickCheck = true)
+
+    private fun runQwenModelSuite(runFullAfterQuickCheck: Boolean) {
+        if (_automatedSuite.value.isRunning || huggingFaceDownloadJob?.isActive == true) return
+        val previousReady = _modelState.value as? ModelLifecycleState.Ready
+        val previousSelection = lastModelSelection
+        val previousFile = activeModelFile
+        val previousConfig = _config.value
+        val suiteConfig = previousConfig.copy(
+            selectedProfile = ProfilePreset.MAX_THROUGHPUT,
+            nCtx = 2048,
+            nBatch = 512,
+            nUbatch = 64,
+            nThreads = 4,
+            nThreadsBatch = 8,
+            backendPreference = BackendPreference.ACCELERATOR_REQUIRED,
+            temperature = 0f,
+            topK = 1,
+            topP = 1f,
+            maxTokens = 32
+        )
+
+        automatedSuiteAbortRequested.set(false)
+        launchEngineOperation {
+            val models = HuggingFaceModelCatalog.models
+            var quickPassed = 0
+            var quickFailed = 0
+            var fullTestsFailed = 0
+            val summaries = mutableListOf<String>()
+            val fullCases = AutomatedModelSuitePlan.fullRoutine()
+            _automatedSuite.value = AutomatedModelSuiteUiState(
+                isRunning = true,
+                phase = "DOWNLOAD",
+                modelCount = models.size,
+                message = "Lade/prüfe nacheinander alle vier Qwen-GGUF-Dateien."
+            )
+            _labTestOutput.value = "Automatische Qwen-Testreihe gestartet."
+            _config.value = suiteConfig
+            try {
+                val modelDirectory = File(getApplication<Application>().filesDir, "models")
+                if (!modelDirectory.exists() && !modelDirectory.mkdirs()) {
+                    throw IOException("Der interne Modellordner konnte nicht angelegt werden.")
+                }
+                val remainingModelBytes = models.sumOf { model ->
+                    val complete = File(modelDirectory, model.filename)
+                    val partial = File(modelDirectory, "${model.filename}.part")
+                    when {
+                        complete.isFile && complete.length() > 0L -> 0L
+                        partial.isFile -> (model.estimatedSizeBytes - partial.length()).coerceAtLeast(0L)
+                        else -> model.estimatedSizeBytes
+                    }
+                }
+                val storageReserveBytes = 128L * 1024L * 1024L
+                val availableBytes = android.os.StatFs(modelDirectory.absolutePath).availableBytes
+                if (availableBytes < remainingModelBytes + storageReserveBytes) {
+                    throw IOException(
+                        "Für alle vier Qwen-Modelle fehlen ungefähr ${(remainingModelBytes + storageReserveBytes - availableBytes) / (1024L * 1024L)} MB Speicher. Benötigt werden rund 3,1 GB für die Modelle plus Reserve."
+                    )
+                }
+
+                // Download all required artifacts first. The downloader resumes partial transfers.
+                for ((index, model) in models.withIndex()) {
+                    if (nativeEngineUnresponsive.get() || automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()) {
+                        throw InterruptedIOException("Die Testreihe wurde abgebrochen.")
+                    }
+                    _automatedSuite.value = _automatedSuite.value.copy(
+                        phase = "DOWNLOAD",
+                        currentModelIndex = index + 1,
+                        currentModelName = "${model.title} · ${model.parameters} · ${model.quantization}",
+                        message = "Download ${index + 1}/${models.size}: ${model.filename}"
+                    )
+                    val file = huggingFaceDownloader.download(model) { downloaded, total ->
+                        if (automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()) {
+                            throw CancellationException("Automatische Testreihe wurde während des Downloads abgebrochen.")
+                        }
+                        _huggingFaceDownload.value = HuggingFaceDownloadUiState(
+                            modelId = model.id,
+                            downloadedBytes = downloaded,
+                            totalBytes = total,
+                            isDownloading = true,
+                            message = "Automatischer Download ${index + 1}/${models.size}"
+                        )
+                    }
+                    _downloadedModelIds.value = _downloadedModelIds.value + model.id
+                }
+                _huggingFaceDownload.value = _huggingFaceDownload.value.copy(
+                    isDownloading = false,
+                    message = "Alle vier Qwen-Modelle wurden heruntergeladen und geprüft."
+                )
+
+                _automatedSuite.value = _automatedSuite.value.copy(
+                    phase = "QUICK_CHECK",
+                    message = "Alle vier Dateien sind geprüft. Starte Quick-Preflight für jedes Modell."
+                )
+                // No full run is allowed until every single model passed this stage.
+                for ((index, model) in models.withIndex()) {
+                    if (nativeEngineUnresponsive.get() || automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()) {
+                        throw InterruptedIOException("Quick-Check durch Nutzer oder native Engine abgebrochen.")
+                    }
+                    val file = File(File(getApplication<Application>().filesDir, "models"), model.filename)
+                    _automatedSuite.value = _automatedSuite.value.copy(
+                        phase = "MODEL_SWITCH",
+                        currentModelIndex = index + 1,
+                        currentModelName = "${model.title} · ${model.parameters} · ${model.quantization}",
+                        message = "Vorheriges Modell entladen; ${model.filename} wird geladen."
+                    )
+                    val ready = loadModelForAutomatedSuite(file, suiteConfig)
+                    if (ready == null) {
+                        quickFailed++
+                        summaries += "Quick-Check ${index + 1}/${models.size} – ${model.filename}: MODELLLADEN FEHLGESCHLAGEN"
+                        break
+                    }
+                    if (runQuickModelCheck(model, ready, suiteConfig, index + 1, models.size)) {
+                        quickPassed++
+                        summaries += "Quick-Check ${index + 1}/${models.size} – ${model.filename}: BESTANDEN"
+                    } else {
+                        quickFailed++
+                        summaries += "Quick-Check ${index + 1}/${models.size} – ${model.filename}: FEHLGESCHLAGEN"
+                        break
+                    }
+                }
+
+                if (quickFailed > 0 || quickPassed != models.size) {
+                    val quickWasAborted = automatedSuiteAbortRequested.get() ||
+                        nativeBridge.isAbortRequested() || nativeEngineUnresponsive.get()
+                    _automatedSuite.value = _automatedSuite.value.copy(
+                        phase = if (quickWasAborted) "ABORTED" else "QUICK_FAILED",
+                        isRunning = false,
+                        quickPassed = quickPassed,
+                        quickFailed = quickFailed,
+                        message = if (quickWasAborted) {
+                            "Quick-Preflight wurde abgebrochen. Die Full-Routine wurde NICHT gestartet."
+                        } else {
+                            "Quick-Preflight nicht vollständig bestanden. Full-Routine wurde NICHT gestartet."
+                        },
+                        error = if (quickWasAborted) null else {
+                            "Mindestens ein Modell scheiterte beim Laden, Vulkan-Offload oder Quick-Inferenztest."
+                        }
+                    )
+                    _labTestOutput.value = summaries.joinToString("\n") +
+                        if (quickWasAborted) {
+                            "\n\nABGEBROCHEN: Full-Routine wurde nicht gestartet."
+                        } else {
+                            "\n\nFULL-TEST ÜBERSPRUNGEN: Quick-Check-Fehler zuerst beheben."
+                        }
+                    return@launchEngineOperation
+                }
+
+                if (!runFullAfterQuickCheck) {
+                    _automatedSuite.value = _automatedSuite.value.copy(
+                        phase = "QUICK_PASSED",
+                        isRunning = false,
+                        quickPassed = quickPassed,
+                        quickFailed = 0,
+                        message = "Quick-Preflight für alle vier Modelle bestanden. Full-Routine freigegeben."
+                    )
+                    _labTestOutput.value = summaries.joinToString("\n") +
+                        "\n\nAlle vier Modelle haben den Quick-Preflight bestanden."
+                    return@launchEngineOperation
+                }
+
+                val fullTestsTotal = models.size * fullCases.sumOf { case ->
+                    AutomatedModelSuitePlan.variantsFor(case).size
+                }
+                var fullTestsCompleted = 0
+                _automatedSuite.value = _automatedSuite.value.copy(
+                    phase = "FULL_TEST",
+                    isRunning = true,
+                    quickPassed = quickPassed,
+                    quickFailed = 0,
+                    fullTestsCompleted = 0,
+                    fullTestsTotal = fullTestsTotal,
+                    message = "Quick-Preflight fehlerfrei. Starte die vollständige siebenstufige Vergleichsmatrix."
+                )
+
+                for ((modelIndex, model) in models.withIndex()) {
+                    if (nativeEngineUnresponsive.get() || automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()) break
+                    val file = File(File(getApplication<Application>().filesDir, "models"), model.filename)
+                    val ready = loadModelForAutomatedSuite(file, suiteConfig)
+                    if (ready == null) {
+                        fullTestsFailed++
+                        summaries += "Full-Test: ${model.filename} konnte nicht geladen werden."
+                        break
+                    }
+                    for (testCase in fullCases) {
+                        if (nativeEngineUnresponsive.get() || automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()) break
+                        _automatedSuite.value = _automatedSuite.value.copy(
+                            phase = "FULL_TEST",
+                            currentModelIndex = modelIndex + 1,
+                            currentModelName = model.filename,
+                            fullTestsCompleted = fullTestsCompleted,
+                            message = "Full-Test: Modell ${modelIndex + 1}/${models.size} · ${testCase.title}"
+                        )
+                        val runsBefore = dao.getCount()
+                        val success = runLabTestInternal(testCase, ready, suiteConfig)
+                        val actualRuns = (dao.getCount() - runsBefore).coerceAtLeast(0)
+                        fullTestsCompleted += actualRuns
+                        if (!success) fullTestsFailed++
+                        summaries += "${model.filename} · ${testCase.title}: ${if (success) "BESTANDEN" else "MIT FEHLERN"}"
+                    }
+                    if (nativeEngineUnresponsive.get() || automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()) break
+                }
+
+                val aborted = automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested() || nativeEngineUnresponsive.get()
+                _automatedSuite.value = _automatedSuite.value.copy(
+                    phase = if (aborted) "ABORTED" else if (fullTestsFailed == 0) "FULL_PASSED" else "FULL_COMPLETED_WITH_FAILURES",
+                    isRunning = false,
+                    quickPassed = quickPassed,
+                    quickFailed = 0,
+                    fullTestsCompleted = fullTestsCompleted,
+                    fullTestsTotal = fullTestsTotal,
+                    message = if (aborted) "Full-Routine abgebrochen." else "Full-Routine beendet: $fullTestsCompleted/$fullTestsTotal Einzelprofile; $fullTestsFailed Workflows mit Fehlern."
+                )
+                _labTestOutput.value = summaries.joinToString("\n")
+            } catch (error: Throwable) {
+                val aborted = error is CancellationException || automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()
+                _automatedSuite.value = _automatedSuite.value.copy(
+                    phase = if (aborted) "ABORTED" else "ERROR",
+                    isRunning = false,
+                    quickPassed = quickPassed,
+                    quickFailed = quickFailed,
+                    message = if (aborted) "Automatische Qwen-Testreihe abgebrochen." else "Automatische Qwen-Testreihe fehlgeschlagen.",
+                    error = error.message ?: error.javaClass.simpleName
+                )
+                _labTestOutput.value = "Automatische Qwen-Testreihe fehlgeschlagen: ${error.message}"
+            } finally {
+                _labActiveTest.value = null
+                if (!nativeEngineUnresponsive.get()) {
+                    if (previousReady != null && previousFile?.isFile == true && previousSelection != null) {
+                        val restored = loadModelForAutomatedSuite(previousFile, previousConfig)
+                        if (restored != null) {
+                            lastModelSelection = previousSelection
+                            localCachedModelUri = previousSelection.uri
+                            activeModelFile = previousFile
+                            _config.value = previousConfig
+                            _modelState.value = restored.copy(fileName = previousReady.fileName)
+                            _labTestOutput.value += "\nUrsprüngliches Modell wurde wiederhergestellt."
+                        } else {
+                            _modelState.value = ModelLifecycleState.Error(
+                                "Die Qwen-Testreihe ist beendet, aber das ursprüngliche Modell konnte nicht wiederhergestellt werden."
+                            )
+                        }
+                    } else {
+                        nativeBridge.unloadModel()
+                        activeModelFile = previousFile
+                        lastModelSelection = previousSelection
+                        localCachedModelUri = previousSelection?.uri
+                        _modelState.value = previousSelection ?: ModelLifecycleState.Unloaded
+                        _config.value = previousConfig
+                    }
+                }
+                _huggingFaceDownload.value = _huggingFaceDownload.value.copy(isDownloading = false)
+                refreshDownloadedModels()
+            }
         }
     }
 
