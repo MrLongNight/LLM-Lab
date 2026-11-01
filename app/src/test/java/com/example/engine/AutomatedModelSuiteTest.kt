@@ -52,4 +52,103 @@ class AutomatedModelSuiteTest {
         assertFalse(AutomatedModelSuitePlan.quickCheckPassed("Vulkan", 29, "TIMEOUT", 0, "BEREIT"))
         assertFalse(AutomatedModelSuitePlan.quickCheckPassed("Vulkan", 29, "STOP_TOKEN", 1, "BEREIT."))
     }
+
+    @Test
+    fun fullRoutineDoesNotStartWhenAnyQuickCheckFails() = kotlinx.coroutines.test.runTest {
+        val models = HuggingFaceModelCatalog.models.take(2)
+        val coordinator = AutomatedModelSuiteCoordinator()
+        val quickChecks = mutableListOf<String>()
+        val fullRuns = mutableListOf<String>()
+        var finalProgress = AutomatedModelSuiteProgress()
+
+        coordinator.execute(
+            models = models,
+            modelDirectory = java.io.File("unused-model-directory"),
+            config = InferenceConfig.fromPreset(ProfilePreset.BALANCED),
+            fullRoutine = listOf(PromptTestCase("TEST_DMS", "DMS", "", "Prompt", emptyList())),
+            runFullAfterQuickCheck = true,
+            isAborted = { false },
+            onProgress = { finalProgress = it },
+            onOutput = {},
+            downloadModel = { _, _, _ -> },
+            loadModel = { file, _ -> file.name },
+            quickCheck = { model, _, _, _ ->
+                quickChecks += model.id
+                model.id == models.first().id
+            },
+            runWorkflow = { testCase, ready, _ ->
+                fullRuns += "${ready}:${testCase.id}"
+                AutomatedWorkflowResult(actualRuns = 1, succeeded = true)
+            }
+        )
+
+        org.junit.Assert.assertEquals(2, quickChecks.size)
+        org.junit.Assert.assertTrue(fullRuns.isEmpty())
+        org.junit.Assert.assertEquals("QUICK_FAILED", finalProgress.phase)
+        org.junit.Assert.assertFalse(finalProgress.isRunning)
+    }
+
+    @Test
+    fun fullRoutineStartsOnlyAfterEveryQuickCheckPassesAndSwitchesModelsSerially() = kotlinx.coroutines.test.runTest {
+        val models = HuggingFaceModelCatalog.models.take(2)
+        val coordinator = AutomatedModelSuiteCoordinator()
+        val loadedFiles = mutableListOf<String>()
+        val fullRuns = mutableListOf<String>()
+        var finalProgress = AutomatedModelSuiteProgress()
+
+        coordinator.execute(
+            models = models,
+            modelDirectory = java.io.File("unused-model-directory"),
+            config = InferenceConfig.fromPreset(ProfilePreset.BALANCED),
+            fullRoutine = listOf(PromptTestCase("TEST_DMS", "DMS", "", "Prompt", emptyList())),
+            runFullAfterQuickCheck = true,
+            isAborted = { false },
+            onProgress = { finalProgress = it },
+            onOutput = {},
+            downloadModel = { _, _, _ -> },
+            loadModel = { file, _ ->
+                loadedFiles += file.name
+                file.name
+            },
+            quickCheck = { _, _, _, _ -> true },
+            runWorkflow = { testCase, ready, _ ->
+                fullRuns += "${ready}:${testCase.id}"
+                AutomatedWorkflowResult(actualRuns = 1, succeeded = true)
+            }
+        )
+
+        org.junit.Assert.assertEquals(
+            listOf(models[0].filename, models[1].filename, models[0].filename, models[1].filename),
+            loadedFiles
+        )
+        org.junit.Assert.assertEquals(2, fullRuns.size)
+        org.junit.Assert.assertEquals("FULL_PASSED", finalProgress.phase)
+        org.junit.Assert.assertEquals(2, finalProgress.fullTestsCompleted)
+        org.junit.Assert.assertEquals(2, finalProgress.fullTestsTotal)
+    }
+
+    @Test
+    fun fullRoutineGateAlsoRejectsAbortAndIncompleteQuickPasses() {
+        org.junit.Assert.assertTrue(
+            AutomatedModelSuiteCoordinator.shouldRunFullRoutine(
+                requested = true, quickPassed = 4, quickFailed = 0, modelCount = 4, aborted = false
+            )
+        )
+        org.junit.Assert.assertFalse(
+            AutomatedModelSuiteCoordinator.shouldRunFullRoutine(
+                requested = true, quickPassed = 3, quickFailed = 1, modelCount = 4, aborted = false
+            )
+        )
+        org.junit.Assert.assertFalse(
+            AutomatedModelSuiteCoordinator.shouldRunFullRoutine(
+                requested = true, quickPassed = 4, quickFailed = 0, modelCount = 4, aborted = true
+            )
+        )
+        org.junit.Assert.assertFalse(
+            AutomatedModelSuiteCoordinator.shouldRunFullRoutine(
+                requested = false, quickPassed = 4, quickFailed = 0, modelCount = 4, aborted = false
+            )
+        )
+    }
+
 }
