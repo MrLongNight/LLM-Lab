@@ -34,6 +34,15 @@ private class TransientDownloadIOException(cause: IOException) :
 class HuggingFaceModelDownloader(context: Context) {
     private val modelDirectory = File(context.filesDir, "models")
 
+    suspend fun findVerifiedLocalModel(model: HuggingFaceModel): File? = withContext(Dispatchers.IO) {
+        val target = File(modelDirectory, model.filename)
+        if (!target.isFile || target.length() <= 0L) return@withContext null
+        val hashMatches = sha256(target).equals(model.sha256, ignoreCase = true)
+        if (!hashMatches) return@withContext null
+        val gguf = GgufMetadataParser.parse(target)
+        target.takeIf { gguf.isValid && gguf.tensorCount > 0L }
+    }
+
     suspend fun download(
         model: HuggingFaceModel,
         onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit
