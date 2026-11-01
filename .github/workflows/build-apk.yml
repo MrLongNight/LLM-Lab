@@ -86,6 +86,9 @@ jobs:
       - name: Run Unit and Robolectric Tests
         run: ./gradlew testDebugUnitTest --no-daemon --no-configuration-cache --stacktrace
 
+      - name: Compile device acceptance tests
+        run: ./gradlew assembleDebugAndroidTest --no-daemon --no-configuration-cache --stacktrace
+
       - name: Verify packaged native backends
         shell: bash
         run: |
