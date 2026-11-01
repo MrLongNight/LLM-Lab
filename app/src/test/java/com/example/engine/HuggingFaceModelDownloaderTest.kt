@@ -1,0 +1,234 @@
+package com.example.engine
+
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.ServerSocket
+import java.net.Socket
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.security.MessageDigest
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [36])
+class HuggingFaceModelDownloaderTest {
+
+    @Test
+    fun retriesInterruptedTransferAndResumesWithRequestedByteRange() = runBlocking {
+        val modelBytes = ByteBuffer.allocate(24)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .put("GGUF".toByteArray(Charsets.US_ASCII))
+            .putInt(3)
+            .putLong(1L)
+            .putLong(0L)
+            .array()
+        val server = InterruptOnceRangeServer(modelBytes)
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val model = HuggingFaceModel(
+            id = "range-resume-test",
+            title = "Range resume test",
+            parameters = "test",
+            quantization = "test",
+            filename = "range-resume-test.gguf",
+            downloadUrl = server.url,
+            sha256 = sha256(modelBytes),
+            estimatedSizeBytes = modelBytes.size.toLong()
+        )
+        val modelDirectory = java.io.File(context.filesDir, "models")
+        java.io.File(modelDirectory, model.filename).delete()
+        java.io.File(modelDirectory, model.filename + ".part").delete()
+
+        try {
+            val downloaded = HuggingFaceModelDownloader(context).download(model) { _, _ -> }
+
+            assertTrue(downloaded.isFile)
+            assertEquals(modelBytes.size.toLong(), downloaded.length())
+            assertEquals(model.sha256, sha256(downloaded.readBytes()))
+            assertEquals(2, server.requests.size)
+            assertTrue(server.requests[0].none { it.startsWith("range:") })
+            assertTrue(server.requests[1].contains("range: bytes=12-"))
+            assertEquals(null, server.failure.get())
+        } finally {
+            server.close()
+            java.io.File(modelDirectory, model.filename).delete()
+            java.io.File(modelDirectory, model.filename + ".part").delete()
+        }
+    }
+
+
+    @Test
+    fun permanentClientErrorsAreNotRetried() = runBlocking {
+        val modelBytes = ByteBuffer.allocate(24)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .put("GGUF".toByteArray(Charsets.US_ASCII))
+            .putInt(3)
+            .putLong(1L)
+            .putLong(0L)
+            .array()
+        val server = SingleStatusServer(404)
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val model = HuggingFaceModel(
+            id = "permanent-status-test",
+            title = "HTTP status test",
+            parameters = "test",
+            quantization = "test",
+            filename = "permanent-status-test.gguf",
+            downloadUrl = server.url,
+            sha256 = sha256(modelBytes),
+            estimatedSizeBytes = modelBytes.size.toLong()
+        )
+        val modelDirectory = java.io.File(context.filesDir, "models")
+        java.io.File(modelDirectory, model.filename).delete()
+        java.io.File(modelDirectory, model.filename + ".part").delete()
+
+        try {
+            var statusError: HttpStatusException? = null
+            try {
+                HuggingFaceModelDownloader(context).download(model) { _, _ -> }
+            } catch (error: HttpStatusException) {
+                statusError = error
+            }
+
+            assertEquals(404, statusError?.code)
+            assertEquals(1, server.requestCount.get())
+            assertEquals(null, server.failure.get())
+        } finally {
+            server.close()
+            java.io.File(modelDirectory, model.filename).delete()
+            java.io.File(modelDirectory, model.filename + ".part").delete()
+        }
+    }
+
+    private fun sha256(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+
+    /**
+     * First response advertises the full length but closes after half of the body.
+     * The second response succeeds only when the client resumes with Range: bytes=12-.
+     */
+
+    private class SingleStatusServer(
+        private val statusCode: Int
+    ) : AutoCloseable {
+        private val listener = ServerSocket(0)
+        val requestCount = AtomicInteger(0)
+        val failure = AtomicReference<Throwable?>()
+        val url: String = "http://127.0.0.1:" + listener.localPort + "/status"
+        private val worker = Thread {
+            try {
+                listener.accept().use { client ->
+                    client.soTimeout = 5_000
+                    val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.US_ASCII))
+                    while (true) {
+                        val line = reader.readLine() ?: break
+                        if (line.isEmpty()) break
+                    }
+                    requestCount.incrementAndGet()
+                    val reason = if (statusCode == 404) "Not Found" else "Error"
+                    val response = ("HTTP/1.1 " + statusCode + " " + reason + "\r\n" +
+                        "Content-Length: 0\r\nConnection: close\r\n\r\n")
+                        .toByteArray(Charsets.US_ASCII)
+                    client.getOutputStream().write(response)
+                    client.getOutputStream().flush()
+                }
+            } catch (error: Throwable) {
+                failure.set(error)
+            }
+        }.apply {
+            name = "hf-status-test-server"
+            isDaemon = true
+            start()
+        }
+
+        override fun close() {
+            listener.close()
+            worker.join(5_000)
+        }
+    }
+
+    private class InterruptOnceRangeServer(
+        private val body: ByteArray
+    ) : AutoCloseable {
+        private val socket = ServerSocket(0)
+        val requests = CopyOnWriteArrayList<List<String>>()
+        val failure = AtomicReference<Throwable?>()
+        val url: String = "http://127.0.0.1:" + socket.localPort + "/model.gguf"
+        private val worker = Thread {
+            try {
+                repeat(2) { requestIndex ->
+                    socket.accept().use { client ->
+                        client.soTimeout = 5_000
+                        val headers = readHeaders(client)
+                        requests += headers
+
+                        if (requestIndex == 0) {
+                            client.getOutputStream().apply {
+                                write(
+                                    ("HTTP/1.1 200 OK\r\n" +
+                                        "Content-Length: " + body.size + "\r\n" +
+                                        "Connection: close\r\n\r\n").toByteArray(Charsets.US_ASCII)
+                                )
+                                write(body, 0, body.size / 2)
+                                flush()
+                            }
+                            client.shutdownOutput()
+                        } else {
+                            val range = headers.firstOrNull { it.startsWith("range:") }
+                            check(range == "range: bytes=" + (body.size / 2) + "-") {
+                                "Expected Range request at " + (body.size / 2) + ", got " + range
+                            }
+                            val start = body.size / 2
+                            client.getOutputStream().apply {
+                                write(
+                                    ("HTTP/1.1 206 Partial Content\r\n" +
+                                        "Content-Length: " + (body.size - start) + "\r\n" +
+                                        "Content-Range: bytes " + start + "-" + body.lastIndex + "/" + body.size + "\r\n" +
+                                        "Connection: close\r\n\r\n").toByteArray(Charsets.US_ASCII)
+                                )
+                                write(body, start, body.size - start)
+                                flush()
+                            }
+                        }
+                    }
+                }
+            } catch (error: Throwable) {
+                failure.set(error)
+            }
+        }.apply {
+            name = "hf-range-resume-test-server"
+            isDaemon = true
+            start()
+        }
+
+        private fun readHeaders(client: Socket): List<String> {
+            val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.US_ASCII))
+            val lines = mutableListOf<String>()
+            val requestLine = reader.readLine() ?: error("Missing request line")
+            lines += requestLine.lowercase()
+            while (true) {
+                val line = reader.readLine() ?: break
+                if (line.isEmpty()) break
+                lines += line.lowercase()
+            }
+            return lines
+        }
+
+        override fun close() {
+            socket.close()
+            worker.join(5_000)
+        }
+    }
+}

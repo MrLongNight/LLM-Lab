@@ -4,8 +4,10 @@ import android.content.Context
 import android.os.StatFs
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.DisposableHandle
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.BufferedInputStream
@@ -16,6 +18,18 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.ThreadLocalRandom
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.min
+
+/** HTTP status failure that retains the response code and requested URL. */
+class HttpStatusException(
+    val code: Int,
+    val url: String
+) : IOException("Download-Server antwortet mit HTTP " + code + " für " + url)
+
+private class TransientDownloadIOException(cause: IOException) :
+    IOException("Vorübergehender Netzwerkfehler beim Modell-Download.", cause)
 
 class HuggingFaceModelDownloader(context: Context) {
     private val modelDirectory = File(context.filesDir, "models")
@@ -30,7 +44,7 @@ class HuggingFaceModelDownloader(context: Context) {
         }
 
         val target = File(modelDirectory, model.filename)
-        val partial = File(modelDirectory, "${model.filename}.part")
+        val partial = File(modelDirectory, model.filename + ".part")
         if (target.isFile && target.length() > 0L) {
             val existingHash = sha256(target)
             if (existingHash.equals(model.sha256, ignoreCase = true) &&
@@ -43,121 +57,26 @@ class HuggingFaceModelDownloader(context: Context) {
             }
         }
 
-        var offset = partial.takeIf { it.isFile }?.length() ?: 0L
-        if (offset > model.estimatedSizeBytes * 1.25) {
-            partial.delete()
-            offset = 0L
-        }
+        val resumeOffset = partial.takeIf { it.isFile }?.length() ?: 0L
+
         val freeBytes = StatFs(modelDirectory.absolutePath).availableBytes
-        val remainingEstimate = (model.estimatedSizeBytes - offset).coerceAtLeast(0L)
+        val remainingEstimate = (model.estimatedSizeBytes - resumeOffset).coerceAtLeast(0L)
         if (freeBytes < remainingEstimate + 64L * 1024L * 1024L) {
             throw IOException(
-                "Zu wenig freier Speicher. Benötigt werden noch ungefähr ${remainingEstimate / (1024L * 1024L)} MB plus 64 MB Reserve."
+                "Zu wenig freier Speicher. Benötigt werden noch ungefähr " +
+                    (remainingEstimate / (1024L * 1024L)) + " MB plus 64 MB Reserve."
             )
         }
 
-        var connection: HttpURLConnection? = null
-        val currentJob = currentCoroutineContext()[Job]
-        currentJob?.invokeOnCompletion { cause ->
-            if (cause is CancellationException) connection?.disconnect()
-        }
-
-        try {
-            val activeConnection = (URL(model.downloadUrl).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 20_000
-                readTimeout = 30_000
-                instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "LLM-Lab-Android/1.4")
-                setRequestProperty("Accept-Encoding", "identity")
-                if (offset > 0L) setRequestProperty("Range", "bytes=$offset-")
-            }
-            connection = activeConnection
-
-            val response = activeConnection.responseCode
-            if (response == 416 && partial.isFile) {
-                val partialInfo = GgufMetadataParser.parse(partial)
-                val partialHash = if (partialInfo.isValid && partialInfo.tensorCount > 0L) sha256(partial) else ""
-                if (partialHash.equals(model.sha256, ignoreCase = true)) {
-                    if (target.exists() && !target.delete()) {
-                        throw IOException("Vorhandene Modell-Datei konnte nicht ersetzt werden.")
-                    }
-                    if (!partial.renameTo(target)) {
-                        throw IOException("Abgeschlossener Teil-Download konnte nicht finalisiert werden.")
-                    }
-                    onProgress(target.length(), target.length())
-                    return@withContext target
-                }
-                partial.delete()
-                throw IOException("Der gespeicherte Teil-Download war unvollständig oder beschädigt und wurde verworfen. Bitte erneut starten.")
-            }
-            if (response != HttpURLConnection.HTTP_OK && response != HttpURLConnection.HTTP_PARTIAL) {
-                throw IOException("Hugging Face antwortet mit HTTP $response. Bitte Netzwerkverbindung prüfen.")
-            }
-
-            val requestedOffset = offset
-            val append = response == HttpURLConnection.HTTP_PARTIAL && requestedOffset > 0L
-            val contentRange = activeConnection.getHeaderField("Content-Range")
-            val rangeMatch = contentRange?.let {
-                Regex("^bytes\\s+(\\d+)-(\\d+)/(\\d+|\\*)$", RegexOption.IGNORE_CASE).matchEntire(it.trim())
-            }
-            if (response == HttpURLConnection.HTTP_PARTIAL) {
-                val actualStart = rangeMatch?.groupValues?.getOrNull(1)?.toLongOrNull()
-                if (actualStart == null || actualStart != requestedOffset) {
-                    throw IOException("Der Hugging-Face-Server lieferte einen unerwarteten Range-Bereich; Teil-Download bleibt erhalten.")
-                }
-            }
-
-            // Some mirrors ignore Range and return a full HTTP 200 response. In that case restart cleanly.
-            val startBytes = if (append) requestedOffset else 0L
-            val contentLength = activeConnection.getHeaderFieldLong("Content-Length", -1L)
-            val rangeTotal = rangeMatch?.groupValues?.getOrNull(3)?.takeUnless { it == "*" }?.toLongOrNull() ?: -1L
-            val authoritativeTotalBytes = when {
-                rangeTotal > 0L -> rangeTotal
-                contentLength > 0L -> startBytes + contentLength
-                else -> -1L
-            }
-            val totalBytes = authoritativeTotalBytes.takeIf { it > 0L } ?: model.estimatedSizeBytes
-
-            onProgress(startBytes, totalBytes)
-            activeConnection.inputStream.use { rawInput ->
-                BufferedInputStream(rawInput, 1024 * 1024).use { input ->
-                    FileOutputStream(partial, append).use { rawOutput ->
-                        BufferedOutputStream(rawOutput, 1024 * 1024).use { output ->
-                            val buffer = ByteArray(1024 * 1024)
-                            var downloaded = startBytes
-                            var lastReported = startBytes
-                            while (true) {
-                                currentCoroutineContext().ensureActive()
-                                val count = input.read(buffer)
-                                if (count < 0) break
-                                output.write(buffer, 0, count)
-                                downloaded += count
-                                if (downloaded - lastReported >= 8L * 1024L * 1024L || downloaded == totalBytes) {
-                                    onProgress(downloaded, totalBytes)
-                                    lastReported = downloaded
-                                }
-                            }
-                            output.flush()
-                            rawOutput.fd.sync()
-                            if (authoritativeTotalBytes > 0L && downloaded != authoritativeTotalBytes) {
-                                throw IOException(
-                                    "Download unvollständig: ${downloaded / (1024L * 1024L)} MB von ungefähr ${totalBytes / (1024L * 1024L)} MB. Erneuter Versuch setzt den Download fort."
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        } finally {
-            connection?.disconnect()
-        }
+        downloadWithRetry(
+            url = model.downloadUrl,
+            dest = partial,
+            expectedSize = model.estimatedSizeBytes,
+            maxAttempts = DEFAULT_MAX_ATTEMPTS,
+            onProgress = onProgress
+        )
 
         currentCoroutineContext().ensureActive()
-        if (partial.length() < model.estimatedSizeBytes * 0.85) {
-            throw IOException("Die heruntergeladene Datei ist deutlich kleiner als erwartet. Der Teil-Download bleibt zum Fortsetzen erhalten.")
-        }
-
         val gguf = GgufMetadataParser.parse(partial)
         if (!gguf.isValid || gguf.tensorCount <= 0L) {
             partial.delete()
@@ -186,10 +105,195 @@ class HuggingFaceModelDownloader(context: Context) {
         target
     }
 
+    /**
+     * Retries transient HTTP/network failures. Resume position is recalculated from the file
+     * after every failed attempt, so successfully written bytes are retained.
+     *
+     * expectedSize is currently a catalog estimate. Strict byte-count validation therefore
+     * uses a server-reported Content-Length / Content-Range when available.
+     */
+    private suspend fun downloadWithRetry(
+        url: String,
+        dest: File,
+        expectedSize: Long,
+        maxAttempts: Int = DEFAULT_MAX_ATTEMPTS,
+        onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit
+    ) {
+        require(maxAttempts >= 1) { "maxAttempts muss mindestens 1 sein." }
+
+        var attempt = 1
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val resumeFrom = dest.takeIf { it.isFile }?.length() ?: 0L
+            try {
+                downloadOnce(url, dest, expectedSize, resumeFrom, onProgress)
+                return
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (status: HttpStatusException) {
+                currentCoroutineContext().ensureActive()
+                if (!status.isRetryable() || attempt >= maxAttempts) throw status
+            } catch (io: TransientDownloadIOException) {
+                currentCoroutineContext().ensureActive()
+                if (attempt >= maxAttempts) throw io
+            }
+
+            val multiplier = (1 shl min(attempt - 1, 3)).toLong()
+            val exponentialDelay = min(INITIAL_BACKOFF_MS * multiplier, MAX_BACKOFF_MS)
+            val jitter = ThreadLocalRandom.current().nextLong(0L, MAX_JITTER_MS + 1L)
+            delay(min(exponentialDelay + jitter, MAX_BACKOFF_MS))
+            attempt++
+        }
+    }
+
+    /**
+     * Performs one HTTP transfer attempt.
+     *
+     * A 200 response after a Range request means the server ignored Range; the destination is
+     * truncated and the full response is written from byte zero. A 206 response is appended
+     * only after its Content-Range start has been verified.
+     */
+    private suspend fun downloadOnce(
+        url: String,
+        dest: File,
+        expectedSize: Long,
+        resumeFrom: Long,
+        onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit
+    ) {
+        currentCoroutineContext().ensureActive()
+
+        var connection: HttpURLConnection? = null
+        val connectionRef = AtomicReference<HttpURLConnection?>()
+        val completionHandle: DisposableHandle? =
+            currentCoroutineContext()[Job]?.invokeOnCompletion { cause ->
+                if (cause is CancellationException) connectionRef.get()?.disconnect()
+            }
+
+        try {
+            val parsedUrl = URL(url)
+            val openedConnection = try {
+                parsedUrl.openConnection() as HttpURLConnection
+            } catch (error: IOException) {
+                currentCoroutineContext().ensureActive()
+                throw TransientDownloadIOException(error)
+            }
+            val activeConnection = openedConnection.apply {
+                requestMethod = "GET"
+                connectTimeout = CONNECT_TIMEOUT_MS
+                readTimeout = READ_TIMEOUT_MS
+                instanceFollowRedirects = true
+                setRequestProperty("User-Agent", USER_AGENT)
+                setRequestProperty("Accept-Encoding", "identity")
+                if (resumeFrom > 0L) setRequestProperty("Range", "bytes=" + resumeFrom + "-")
+            }
+            connection = activeConnection
+            connectionRef.set(activeConnection)
+            currentCoroutineContext().ensureActive()
+
+            val response = try {
+                activeConnection.responseCode
+            } catch (error: IOException) {
+                currentCoroutineContext().ensureActive()
+                throw TransientDownloadIOException(error)
+            }
+            if (response == HTTP_RANGE_NOT_SATISFIABLE) {
+                // A 416 is a permanent client error under the downloader retry policy.
+                // Discard the unusable offset so a later manual attempt starts from zero.
+                if (dest.exists() && !dest.delete()) {
+                    throw IOException("Ungültiger Teil-Download konnte nach HTTP 416 nicht zurückgesetzt werden.")
+                }
+                throw HttpStatusException(response, url)
+            }
+
+            if (response != HttpURLConnection.HTTP_OK && response != HttpURLConnection.HTTP_PARTIAL) {
+                throw HttpStatusException(response, url)
+            }
+
+            val contentRange = activeConnection.getHeaderField("Content-Range")
+            val rangeMatch = CONTENT_RANGE_REGEX.matchEntire(contentRange.orEmpty())
+            if (response == HttpURLConnection.HTTP_PARTIAL) {
+                val actualStart = rangeMatch?.groupValues?.getOrNull(1)?.toLongOrNull()
+                val actualEnd = rangeMatch?.groupValues?.getOrNull(2)?.toLongOrNull()
+                if (actualStart == null || actualStart != resumeFrom ||
+                    actualEnd == null || actualEnd < actualStart) {
+                    throw IOException(
+                        "Der Server lieferte einen unerwarteten Content-Range-Bereich; der vorhandene Teil-Download bleibt erhalten."
+                    )
+                }
+            }
+
+            // HTTP 200 ignores Range: restart from byte zero instead of appending duplicate bytes.
+            val append = response == HttpURLConnection.HTTP_PARTIAL && resumeFrom > 0L
+            val startBytes = if (append) resumeFrom else 0L
+            val contentLength = activeConnection.getHeaderFieldLong("Content-Length", -1L)
+            val rangeTotal = rangeMatch?.groupValues?.getOrNull(3)
+                ?.takeUnless { it == "*" }
+                ?.toLongOrNull()
+            val authoritativeTotalBytes = when {
+                rangeTotal != null && rangeTotal > 0L -> rangeTotal
+                contentLength >= 0L -> startBytes + contentLength
+                else -> null
+            }
+            val progressTotal = authoritativeTotalBytes ?: expectedSize
+            onProgress(startBytes, progressTotal)
+
+            val responseInput = try {
+                activeConnection.inputStream
+            } catch (error: IOException) {
+                currentCoroutineContext().ensureActive()
+                throw TransientDownloadIOException(error)
+            }
+            responseInput.use { rawInput ->
+                BufferedInputStream(rawInput, BUFFER_SIZE).use { input ->
+                    FileOutputStream(dest, append).use { rawOutput ->
+                        BufferedOutputStream(rawOutput, BUFFER_SIZE).use { output ->
+                            val buffer = ByteArray(BUFFER_SIZE)
+                            var downloaded = startBytes
+                            var lastReported = startBytes
+                            while (true) {
+                                currentCoroutineContext().ensureActive()
+                                val count = try {
+                                    input.read(buffer)
+                                } catch (error: IOException) {
+                                    currentCoroutineContext().ensureActive()
+                                    throw TransientDownloadIOException(error)
+                                }
+                                if (count < 0) break
+                                output.write(buffer, 0, count)
+                                downloaded += count
+                                if (downloaded - lastReported >= PROGRESS_INTERVAL_BYTES ||
+                                    (progressTotal > 0L && downloaded == progressTotal)) {
+                                    onProgress(downloaded, progressTotal)
+                                    lastReported = downloaded
+                                }
+                            }
+                            output.flush()
+                            rawOutput.fd.sync()
+                        }
+                    }
+                }
+            }
+
+            // The catalog size is an estimate, not an exact value. When the server declares
+            // its real total, validate the resulting file against that exact byte count.
+            if (authoritativeTotalBytes != null && dest.length() != authoritativeTotalBytes) {
+                val sizeError = IOException(
+                    "Download unvollständig: " + dest.length() + " Bytes von " +
+                        authoritativeTotalBytes + " Bytes. Der nächste Versuch setzt den Download fort."
+                )
+                throw TransientDownloadIOException(sizeError)
+            }
+        } finally {
+            completionHandle?.dispose()
+            connectionRef.set(null)
+            connection?.disconnect()
+        }
+    }
+
     private suspend fun sha256(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().buffered(1024 * 1024).use { input ->
-            val buffer = ByteArray(1024 * 1024)
+        file.inputStream().buffered(BUFFER_SIZE).use { input ->
+            val buffer = ByteArray(BUFFER_SIZE)
             while (true) {
                 currentCoroutineContext().ensureActive()
                 val count = input.read(buffer)
@@ -198,5 +302,28 @@ class HuggingFaceModelDownloader(context: Context) {
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun HttpStatusException.isRetryable(): Boolean =
+        code == HTTP_REQUEST_TIMEOUT || code == HTTP_TOO_MANY_REQUESTS || code in HTTP_SERVER_ERROR..599
+
+    private companion object {
+        const val DEFAULT_MAX_ATTEMPTS = 4
+        const val INITIAL_BACKOFF_MS = 1_000L
+        const val MAX_BACKOFF_MS = 8_000L
+        const val MAX_JITTER_MS = 500L
+        const val CONNECT_TIMEOUT_MS = 20_000
+        const val READ_TIMEOUT_MS = 30_000
+        const val USER_AGENT = "LLM-Lab-Android/1.4"
+        const val BUFFER_SIZE = 1024 * 1024
+        const val PROGRESS_INTERVAL_BYTES = 8L * 1024L * 1024L
+
+        const val HTTP_REQUEST_TIMEOUT = 408
+        const val HTTP_TOO_MANY_REQUESTS = 429
+        const val HTTP_SERVER_ERROR = 500
+        const val HTTP_RANGE_NOT_SATISFIABLE = 416
+
+        val CONTENT_RANGE_REGEX = Regex("^bytes\\s+(\\d+)-(\\d+)/(\\d+|\\*)$", RegexOption.IGNORE_CASE)
+
     }
 }
