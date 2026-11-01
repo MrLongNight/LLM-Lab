@@ -16,6 +16,7 @@ import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
 import android.os.PersistableBundle
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
@@ -55,6 +56,7 @@ object HuggingFaceDownloadBackgroundManager {
     const val EXTRA_TOTAL = "total_bytes"
     const val EXTRA_ERROR = "error_message"
     const val EXTRA_MODEL_IDS = "model_ids"
+    const val ACTION_CANCEL = "com.example.llmlab.CANCEL_BACKGROUND_DOWNLOAD"
 
     private const val PREFS = "huggingface_background_downloads"
     private const val KEY_SCHEDULED_IDS = "scheduled_ids"
@@ -168,7 +170,7 @@ object HuggingFaceDownloadBackgroundManager {
         } else {
             app.startService(
                 Intent(app, HuggingFaceModelDownloadForegroundService::class.java)
-                    .setAction(HuggingFaceModelDownloadForegroundService.ACTION_CANCEL)
+                    .setAction(ACTION_CANCEL)
                     .putExtra(EXTRA_MODEL_ID, modelId)
             )
         }
@@ -379,8 +381,10 @@ class HuggingFaceModelDownloadForegroundService : Service() {
         DownloadNotification.ensureChannel(this)
     }
 
+    override fun onBind(intent: Intent?): IBinder? = null
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_CANCEL) {
+        if (intent?.action == HuggingFaceDownloadBackgroundManager.ACTION_CANCEL) {
             val modelId = intent.getStringExtra(HuggingFaceDownloadBackgroundManager.EXTRA_MODEL_ID)
             if (modelId != null) {
                 val pending = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(this)
@@ -483,7 +487,6 @@ class HuggingFaceModelDownloadForegroundService : Service() {
 
     private companion object {
         const val NOTIFICATION_ID = 41_699
-        const val ACTION_CANCEL = "com.example.llmlab.CANCEL_BACKGROUND_DOWNLOAD"
     }
 }
 

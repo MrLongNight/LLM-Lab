@@ -403,7 +403,7 @@ class AutomatedModelSuiteCoordinator {
 
             for ((modelIndex, model) in models.withIndex()) {
                 if (isAborted()) break
-                val ready = loadModel(File(modelDirectory, model.filename), config)
+                val ready = loadModel(File(modelDirectory, model.filename), config, timeout)
                 if (ready == null) {
                     fullTestsFailed++
                     summaries += "Full-Test: ${model.filename} konnte nicht geladen werden."
