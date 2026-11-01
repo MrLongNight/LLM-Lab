@@ -25,6 +25,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
@@ -68,76 +69,94 @@ object HuggingFaceDownloadBackgroundManager {
         onProgress: (Long, Long) -> Unit
     ): File {
         val app = context.applicationContext
-        val downloader = HuggingFaceModelDownloader(app)
-        downloader.findVerifiedLocalModel(model)?.let {
-            onProgress(it.length(), it.length())
-            return it
-        }
 
-        return suspendCancellableCoroutine { continuation ->
-            val receiverRegistered = java.util.concurrent.atomic.AtomicBoolean(false)
-            lateinit var receiver: BroadcastReceiver
-            fun unregisterReceiver() {
-                if (receiverRegistered.compareAndSet(true, false)) {
-                    runCatching { app.unregisterReceiver(receiver) }
+        // Start the foreground service synchronously on the main thread. The call originates
+        // from the visible Download action, so Android can reliably attribute it to the user.
+        return withContext(Dispatchers.Main.immediate) {
+            suspendCancellableCoroutine { continuation ->
+                val receiverRegistered = java.util.concurrent.atomic.AtomicBoolean(false)
+                lateinit var receiver: BroadcastReceiver
+
+                fun unregisterReceiver() {
+                    if (receiverRegistered.compareAndSet(true, false)) {
+                        runCatching { app.unregisterReceiver(receiver) }
+                    }
                 }
-            }
-            receiver = object : BroadcastReceiver() {
-                override fun onReceive(context: Context?, intent: Intent?) {
-                    if (intent?.getStringExtra(EXTRA_MODEL_ID) != model.id || !continuation.isActive) return
-                    when (intent.action) {
-                        ACTION_PROGRESS -> {
-                            try {
-                                onProgress(
-                                    intent.getLongExtra(EXTRA_DOWNLOADED, 0L),
-                                    intent.getLongExtra(EXTRA_TOTAL, model.estimatedSizeBytes)
-                                )
-                            } catch (error: Throwable) {
-                                unregisterReceiver()
-                                val cancellation = error as? CancellationException
-                                    ?: CancellationException("Download-Fortschritt wurde abgebrochen.").apply {
-                                        initCause(error)
-                                    }
-                                continuation.cancel(cancellation)
+
+                receiver = object : BroadcastReceiver() {
+                    override fun onReceive(context: Context?, intent: Intent?) {
+                        if (intent?.getStringExtra(EXTRA_MODEL_ID) != model.id || !continuation.isActive) return
+
+                        when (intent.action) {
+                            ACTION_PROGRESS -> {
+                                try {
+                                    onProgress(
+                                        intent.getLongExtra(EXTRA_DOWNLOADED, 0L),
+                                        intent.getLongExtra(EXTRA_TOTAL, model.estimatedSizeBytes)
+                                    )
+                                } catch (error: Throwable) {
+                                    unregisterReceiver()
+                                    val cancellation = error as? CancellationException
+                                        ?: CancellationException("Download-Fortschritt wurde abgebrochen.").apply {
+                                            initCause(error)
+                                        }
+                                    continuation.cancel(cancellation)
+                                }
                             }
-                        }
-                        ACTION_COMPLETED -> {
-                            unregisterReceiver()
-                            val file = File(app.filesDir, "models/${model.filename}")
-                            if (file.isFile && file.length() > 0L) continuation.resume(file)
-                            else continuation.resumeWithException(IOException("Download für ${model.filename} wurde ohne fertige Datei gemeldet."))
-                        }
-                        ACTION_FAILED -> {
-                            unregisterReceiver()
-                            continuation.resumeWithException(
-                                IOException(intent.getStringExtra(EXTRA_ERROR) ?: "Download für ${model.filename} fehlgeschlagen.")
-                            )
+
+                            ACTION_COMPLETED -> {
+                                unregisterReceiver()
+                                val file = File(app.filesDir, "models/${model.filename}")
+                                if (file.isFile && file.length() > 0L) {
+                                    continuation.resume(file)
+                                } else {
+                                    continuation.resumeWithException(
+                                        IOException("Download für ${model.filename} wurde ohne fertige Datei gemeldet.")
+                                    )
+                                }
+                            }
+
+                            ACTION_FAILED -> {
+                                unregisterReceiver()
+                                continuation.resumeWithException(
+                                    IOException(
+                                        intent.getStringExtra(EXTRA_ERROR)
+                                            ?: "Download für ${model.filename} fehlgeschlagen."
+                                    )
+                                )
+                            }
                         }
                     }
                 }
-            }
 
-            ContextCompat.registerReceiver(
-                app,
-                receiver,
-                IntentFilter().apply {
-                    addAction(ACTION_PROGRESS)
-                    addAction(ACTION_COMPLETED)
-                    addAction(ACTION_FAILED)
-                },
-                ContextCompat.RECEIVER_NOT_EXPORTED
-            )
-            receiverRegistered.set(true)
-            continuation.invokeOnCancellation {
-                unregisterReceiver()
-                cancel(app, model.id)
-            }
+                ContextCompat.registerReceiver(
+                    app,
+                    receiver,
+                    IntentFilter().apply {
+                        addAction(ACTION_PROGRESS)
+                        addAction(ACTION_COMPLETED)
+                        addAction(ACTION_FAILED)
+                    },
+                    ContextCompat.RECEIVER_NOT_EXPORTED
+                )
+                receiverRegistered.set(true)
 
-            try {
-                enqueue(app, listOf(model))
-            } catch (error: Throwable) {
-                runCatching { app.unregisterReceiver(receiver) }
-                if (continuation.isActive) continuation.resumeWithException(error)
+                continuation.invokeOnCancellation {
+                    unregisterReceiver()
+                    cancel(app, model.id)
+                }
+
+                if (!continuation.isActive) {
+                    unregisterReceiver()
+                    return@suspendCancellableCoroutine
+                }
+
+                try {
+                    enqueue(app, listOf(model))
+                } catch (error: Throwable) {
+                    unregisterReceiver()
+                    if (continuation.isActive) continuation.resumeWithException(error)
+                }
             }
         }
     }

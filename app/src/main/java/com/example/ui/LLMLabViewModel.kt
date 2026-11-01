@@ -15,6 +15,7 @@ import com.example.engine.GgufInfo
 import com.example.engine.GgufMetadataParser
 import com.example.engine.HuggingFaceModelCatalog
 import com.example.engine.HuggingFaceDownloadBackgroundManager
+import com.example.engine.HuggingFaceModelDownloader
 import com.example.engine.AutomatedModelSuitePlan
 import com.example.engine.AutomatedModelSuiteCoordinator
 import com.example.engine.AutomatedModelSuiteProgress
@@ -445,18 +446,12 @@ class LLMLabViewModel @JvmOverloads constructor(
      * Search all app-private locations used by previous LLM Lab builds before
      * showing a model as missing. Never delete or redownload a discovered file.
      */
-    private fun findLocalHuggingFaceModel(model: com.example.engine.HuggingFaceModel): File? {
-        val context = getApplication<Application>()
-        val candidates = listOfNotNull(
-            File(context.filesDir, "models/${model.filename}"),
-            File(context.filesDir, model.filename),
-            context.getExternalFilesDir("models")?.let { File(it, model.filename) },
-            context.getExternalFilesDir(null)?.let { File(it, "models/${model.filename}") },
-            context.getExternalFilesDir(null)?.let { File(it, model.filename) }
-        ).distinctBy { it.absolutePath }
-        return candidates.firstOrNull { file ->
-            file.isFile && file.length() >= (model.estimatedSizeBytes * 0.85).toLong()
-        }
+    /**
+     * A model is available only when its canonical internal file passes both integrity checks.
+     * Estimated size and the mere existence of a file are not sufficient.
+     */
+    private suspend fun findLocalHuggingFaceModel(model: com.example.engine.HuggingFaceModel): File? {
+        return HuggingFaceModelDownloader(getApplication()).findVerifiedLocalModel(model)
     }
 
     fun refreshDownloadedModels() {
@@ -470,18 +465,23 @@ class LLMLabViewModel @JvmOverloads constructor(
 
     fun selectDownloadedHuggingFaceModel(modelId: String) {
         val model = HuggingFaceModelCatalog.find(modelId) ?: return
-        val file = findLocalHuggingFaceModel(model)
-        if (file == null) {
-            refreshDownloadedModels()
-            _huggingFaceDownloads.update { current ->
-                current + (modelId to HuggingFaceDownloadUiState(
-                    modelId = modelId,
-                    error = "In den lokalen App-Speichern wurde keine vollständige Datei gefunden. Es wird nichts gelöscht; bitte erst Speicher prüfen, bevor du erneut herunterlädst."
-                ))
+        viewModelScope.launch(Dispatchers.IO) {
+            val file = findLocalHuggingFaceModel(model)
+            if (file == null) {
+                _downloadedModelIds.value = _downloadedModelIds.value - modelId
+                refreshDownloadedModels()
+                _huggingFaceDownloads.update { current ->
+                    current + (modelId to HuggingFaceDownloadUiState(
+                        modelId = modelId,
+                        error = "Die lokale Datei besteht die SHA-256- oder GGUF-Prüfung nicht. Sie wird nicht als verfügbar angeboten. Bitte erneut herunterladen."
+                    ))
+                }
+                return@launch
             }
-            return
+            withContext(Dispatchers.Main.immediate) {
+                onModelFileSelected(Uri.fromFile(file))
+            }
         }
-        onModelFileSelected(Uri.fromFile(file))
     }
 
     fun downloadHuggingFaceModel(modelId: String) {
@@ -507,7 +507,7 @@ class LLMLabViewModel @JvmOverloads constructor(
         }
 
         // LAZY ensures the Job is registered before it can finish or be cancelled.
-        val job = viewModelScope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
                 val file = HuggingFaceDownloadBackgroundManager.download(getApplication(), model) { downloaded, total ->
                     _huggingFaceDownloads.update { current ->

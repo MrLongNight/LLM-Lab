@@ -40,6 +40,70 @@ class DownloaderTestStatFsShadow {
 class HuggingFaceModelDownloaderTest {
 
     @Test
+    fun findVerifiedLocalModelAcceptsMatchingShaAndValidGguf() = runBlocking {
+        val modelBytes = ByteBuffer.allocate(24)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .put("GGUF".toByteArray(Charsets.US_ASCII))
+            .putInt(3)
+            .putLong(1L)
+            .putLong(0L)
+            .array()
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val model = HuggingFaceModel(
+            id = "verified-local-test",
+            title = "Verified local test",
+            parameters = "test",
+            quantization = "test",
+            filename = "verified-local-test.gguf",
+            downloadUrl = "http://127.0.0.1/unrequested",
+            sha256 = sha256(modelBytes),
+            estimatedSizeBytes = modelBytes.size.toLong()
+        )
+        val directory = java.io.File(context.filesDir, "models")
+        assertTrue(directory.mkdirs() || directory.isDirectory)
+        val target = java.io.File(directory, model.filename)
+        try {
+            target.writeBytes(modelBytes)
+            val verified = HuggingFaceModelDownloader(context).findVerifiedLocalModel(model)
+            assertEquals(target.canonicalFile, verified?.canonicalFile)
+        } finally {
+            target.delete()
+        }
+    }
+
+    @Test
+    fun findVerifiedLocalModelRejectsValidGgufWithWrongSha256() = runBlocking {
+        val modelBytes = ByteBuffer.allocate(24)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .put("GGUF".toByteArray(Charsets.US_ASCII))
+            .putInt(3)
+            .putLong(1L)
+            .putLong(0L)
+            .array()
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val model = HuggingFaceModel(
+            id = "wrong-sha-local-test",
+            title = "Wrong SHA local test",
+            parameters = "test",
+            quantization = "test",
+            filename = "wrong-sha-local-test.gguf",
+            downloadUrl = "http://127.0.0.1/unrequested",
+            sha256 = "0".repeat(64),
+            estimatedSizeBytes = modelBytes.size.toLong()
+        )
+        val directory = java.io.File(context.filesDir, "models")
+        assertTrue(directory.mkdirs() || directory.isDirectory)
+        val target = java.io.File(directory, model.filename)
+        try {
+            target.writeBytes(modelBytes)
+            val verified = HuggingFaceModelDownloader(context).findVerifiedLocalModel(model)
+            assertEquals(null, verified)
+        } finally {
+            target.delete()
+        }
+    }
+
+    @Test
     fun retriesInterruptedTransferAndResumesWithRequestedByteRange() = runBlocking {
         val modelBytes = ByteBuffer.allocate(24)
             .order(ByteOrder.LITTLE_ENDIAN)
