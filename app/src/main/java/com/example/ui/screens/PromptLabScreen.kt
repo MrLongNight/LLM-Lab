@@ -34,7 +34,8 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
     val labMetrics by viewModel.labMetrics.collectAsState()
     val config by viewModel.config.collectAsState()
     val automatedSuite by viewModel.automatedSuite.collectAsState()
-    val downloadState by viewModel.huggingFaceDownload.collectAsState()
+    val downloads by viewModel.huggingFaceDownloads.collectAsState()
+    val downloadInProgress = downloads.values.any { it.isDownloading }
 
     val readyState = modelState as? ModelLifecycleState.Ready
     val isModelReady = readyState != null && readyState.loadedConfig.hasSameNativeContext(config)
@@ -110,7 +111,7 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
 
         AutomatedQwenSuiteCard(
             suiteState = automatedSuite,
-            downloadInProgress = downloadState.isDownloading,
+            downloadInProgress = downloadInProgress,
             singleTestRunning = isRunning,
             onQuickCheck = { viewModel.runQwenQuickCheck() },
             onQuickThenFull = { viewModel.runQwenQuickThenFull() },
