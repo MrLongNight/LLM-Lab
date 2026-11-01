@@ -104,6 +104,39 @@ class HuggingFaceModelDownloaderTest {
     }
 
     @Test
+    fun legacyLocationCanBeVerifiedOnlyWithMatchingShaAndValidGguf() = runBlocking {
+        val modelBytes = ByteBuffer.allocate(24)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .put("GGUF".toByteArray(Charsets.US_ASCII))
+            .putInt(3)
+            .putLong(1L)
+            .putLong(0L)
+            .array()
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val model = HuggingFaceModel(
+            id = "legacy-path-test",
+            title = "Legacy path test",
+            parameters = "test",
+            quantization = "test",
+            filename = "legacy-path-test.gguf",
+            downloadUrl = "http://127.0.0.1/unrequested",
+            sha256 = sha256(modelBytes),
+            estimatedSizeBytes = modelBytes.size.toLong()
+        )
+        val legacyDirectory = java.io.File(context.filesDir, "legacy-model-location")
+        assertTrue(legacyDirectory.mkdirs() || legacyDirectory.isDirectory)
+        val target = java.io.File(legacyDirectory, model.filename)
+        try {
+            target.writeBytes(modelBytes)
+            assertTrue(HuggingFaceModelDownloader(context).isVerifiedLocalModelFile(target, model))
+            val wrongHash = model.copy(sha256 = "0".repeat(64))
+            assertFalse(HuggingFaceModelDownloader(context).isVerifiedLocalModelFile(target, wrongHash))
+        } finally {
+            target.delete()
+        }
+    }
+
+    @Test
     fun retriesInterruptedTransferAndResumesWithRequestedByteRange() = runBlocking {
         val modelBytes = ByteBuffer.allocate(24)
             .order(ByteOrder.LITTLE_ENDIAN)

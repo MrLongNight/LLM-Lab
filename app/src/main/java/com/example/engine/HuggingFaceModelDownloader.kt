@@ -29,19 +29,28 @@ class HttpStatusException(
 ) : IOException("Download-Server antwortet mit HTTP " + code + " für " + url)
 
 private class TransientDownloadIOException(cause: IOException) :
-    IOException("Vorübergehender Netzwerkfehler beim Modell-Download.", cause)
+    IOException(
+        "Netzwerkfehler beim Modell-Download: " +
+            (cause.localizedMessage ?: cause.javaClass.simpleName),
+        cause
+    )
 
 class HuggingFaceModelDownloader(context: Context) {
     private val modelDirectory = File(context.filesDir, "models")
 
-    suspend fun findVerifiedLocalModel(model: HuggingFaceModel): File? = withContext(Dispatchers.IO) {
+    suspend fun findVerifiedLocalModel(model: HuggingFaceModel): File? {
         val target = File(modelDirectory, model.filename)
-        if (!target.isFile || target.length() <= 0L) return@withContext null
-        val hashMatches = sha256(target).equals(model.sha256, ignoreCase = true)
-        if (!hashMatches) return@withContext null
-        val gguf = GgufMetadataParser.parse(target)
-        target.takeIf { gguf.isValid && gguf.tensorCount > 0L }
+        return target.takeIf { isVerifiedLocalModelFile(it, model) }
     }
+
+    /** Full integrity check for canonical and legacy app-private model paths. */
+    suspend fun isVerifiedLocalModelFile(file: File, model: HuggingFaceModel): Boolean =
+        withContext(Dispatchers.IO) {
+            if (!file.isFile || file.length() <= 0L) return@withContext false
+            if (!sha256(file).equals(model.sha256, ignoreCase = true)) return@withContext false
+            val gguf = GgufMetadataParser.parse(file)
+            gguf.isValid && gguf.tensorCount > 0L
+        }
 
     suspend fun download(
         model: HuggingFaceModel,

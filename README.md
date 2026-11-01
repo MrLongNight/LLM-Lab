@@ -72,6 +72,14 @@ Die Integration in myDocAnizer-Mobile wird erst freigegeben, wenn diese Punkte a
 
 Leere Felder bedeuten **nicht getestet**. CI-Ergebnisse ersetzen keine echten Geräteläufe.
 
+## Referenztest statt Vier-Modell-Matrix
+
+Die automatisierten Quick-/Full-Abnahmeläufe verwenden genau ein Referenzmodell:
+**Qwen2.5 1.5B Instruct Q4_K_M**. Damit wird die lokale Download-, Lade-, Inferenz-
+und Abort-Kette reproduzierbar geprüft, ohne vier große Modell-Downloads als
+Pflicht vorauszusetzen. Die übrigen Katalogeinträge bleiben optionale manuelle
+Vergleichsmodelle und sind kein automatisches Abnahme-Gate.
+
 ## Qwen-Modellkatalog
 
 | Parameter | Quantisierung | Datei |

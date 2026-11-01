@@ -17,6 +17,9 @@ data class HuggingFaceModel(
 }
 
 object HuggingFaceModelCatalog {
+    /** Single reference model for automated Quick/Full acceptance runs. */
+    const val REFERENCE_MODEL_ID = "qwen25_15b_q4_k_m"
+
     // Official Qwen GGUF repositories and SHA-256 values published by Hugging Face Xet pointers.
     val models: List<HuggingFaceModel> = listOf(
         HuggingFaceModel(

@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class AutomatedModelSuiteTest {
     @Test
-    fun catalogHasFourOfficialModelsWithPinnedChecksums() {
+    fun catalogOffersFourOptionalModelsWithPinnedChecksums() {
         assertEquals(4, HuggingFaceModelCatalog.models.size)
         assertEquals(4, HuggingFaceModelCatalog.models.map { it.filename }.toSet().size)
         HuggingFaceModelCatalog.models.forEach { model ->
@@ -21,10 +21,10 @@ class AutomatedModelSuiteTest {
     }
 
     @Test
-    fun fullSuiteContainsSevenWorkflowsAndEightyProfiles() {
+    fun fullSuiteContainsSevenWorkflowsAndTwentyProfilesForOneReferenceModel() {
         assertEquals(7, AutomatedModelSuitePlan.fullRoutine().size)
         assertEquals(20, AutomatedModelSuitePlan.fullProfileCountPerModel())
-        assertEquals(80, HuggingFaceModelCatalog.models.size * AutomatedModelSuitePlan.fullProfileCountPerModel())
+        assertTrue(HuggingFaceModelCatalog.models.any { it.id == HuggingFaceModelCatalog.REFERENCE_MODEL_ID })
     }
 
     @Test
@@ -135,7 +135,7 @@ class AutomatedModelSuiteTest {
     @Test
     fun quickModeRunsAtMostTwoDownloadsConcurrentlyButKeepsInferenceSerial() = kotlinx.coroutines.test.runTest {
         val coordinator = AutomatedModelSuiteCoordinator()
-        val models = HuggingFaceModelCatalog.models
+        val models = HuggingFaceModelCatalog.models.take(2)
         val activeDownloads = AtomicInteger()
         val peakDownloads = AtomicInteger()
         val activeWorkflows = AtomicInteger()

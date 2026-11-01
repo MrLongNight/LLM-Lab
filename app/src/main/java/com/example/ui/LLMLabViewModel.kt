@@ -443,15 +443,40 @@ class LLMLabViewModel @JvmOverloads constructor(
     }
 
     /**
-     * Search all app-private locations used by previous LLM Lab builds before
-     * showing a model as missing. Never delete or redownload a discovered file.
+     * Keep legacy app-private model locations discoverable across prototype builds.
+     * Any reused file must pass the complete SHA-256 and GGUF checks.
      */
-    /**
-     * A model is available only when its canonical internal file passes both integrity checks.
-     * Estimated size and the mere existence of a file are not sufficient.
-     */
-    private suspend fun findLocalHuggingFaceModel(model: com.example.engine.HuggingFaceModel): File? {
-        return HuggingFaceModelDownloader(getApplication()).findVerifiedLocalModel(model)
+    private fun localHuggingFaceModelCandidates(
+        model: com.example.engine.HuggingFaceModel
+    ): List<File> {
+        val context = getApplication<Application>()
+        return listOfNotNull(
+            File(context.filesDir, "models/${model.filename}"),
+            File(context.filesDir, model.filename),
+            context.getExternalFilesDir("models")?.let { File(it, model.filename) },
+            context.getExternalFilesDir(null)?.let { File(it, "models/${model.filename}") },
+            context.getExternalFilesDir(null)?.let { File(it, model.filename) }
+        ).distinctBy { it.absolutePath }
+    }
+
+    /** Size-only hint for storage preflight; never marks a model as downloaded or reusable. */
+    private fun hasPotentialLocalHuggingFaceModel(
+        model: com.example.engine.HuggingFaceModel
+    ): Boolean {
+        val minimumPlausibleSize = (model.estimatedSizeBytes * 0.85).toLong()
+        return localHuggingFaceModelCandidates(model).any { file ->
+            file.isFile && file.length() >= minimumPlausibleSize
+        }
+    }
+
+    private suspend fun findLocalHuggingFaceModel(
+        model: com.example.engine.HuggingFaceModel
+    ): File? {
+        val downloader = HuggingFaceModelDownloader(getApplication())
+        for (candidate in localHuggingFaceModelCandidates(model)) {
+            if (downloader.isVerifiedLocalModelFile(candidate, model)) return candidate
+        }
+        return null
     }
 
     fun refreshDownloadedModels() {
@@ -1564,10 +1589,12 @@ class LLMLabViewModel @JvmOverloads constructor(
         )
 
         val models = HuggingFaceModelCatalog.models
-        val requiredModels = if (request.mode == com.example.engine.SuiteMode.SINGLE) {
-            models.filter { it.id == request.singleModel }
-        } else {
-            models
+        val requiredModels = when (request.mode) {
+            com.example.engine.SuiteMode.SINGLE ->
+                models.filter { it.id == request.singleModel }
+            com.example.engine.SuiteMode.QUICK,
+            com.example.engine.SuiteMode.FULL ->
+                models.filter { it.id == HuggingFaceModelCatalog.REFERENCE_MODEL_ID }
         }
         val modelDirectory = File(getApplication<Application>().filesDir, "models")
         automatedSuiteAbortRequested.set(false)
@@ -1582,7 +1609,7 @@ class LLMLabViewModel @JvmOverloads constructor(
                     val complete = File(modelDirectory, model.filename)
                     val partial = File(modelDirectory, "${model.filename}.part")
                     when {
-                        findLocalHuggingFaceModel(model) != null -> 0L
+                        hasPotentialLocalHuggingFaceModel(model) -> 0L
                         partial.isFile -> (model.estimatedSizeBytes - partial.length()).coerceAtLeast(0L)
                         else -> model.estimatedSizeBytes
                     }
@@ -1624,7 +1651,7 @@ class LLMLabViewModel @JvmOverloads constructor(
             try {
                 automatedSuiteCoordinator.run(
                     request = request,
-                    models = models,
+                    models = requiredModels,
                     modelDirectory = modelDirectory,
                     config = suiteConfig,
                     fullRoutine = AutomatedModelSuitePlan.fullRoutine(),
