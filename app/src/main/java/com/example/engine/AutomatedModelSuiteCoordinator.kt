@@ -62,7 +62,7 @@ class AutomatedModelSuiteCoordinator(
         currentJob.get()?.cancel(CancellationException("Critical memory pressure; model suite cancelled."))
     }
 
-    private suspend fun <Ready : Any> runInternal(
+    suspend fun <Ready : Any> run(
         request: SuiteRequest,
         models: List<HuggingFaceModel>,
         modelDirectory: File,
@@ -145,7 +145,7 @@ class AutomatedModelSuiteCoordinator(
     fun runFull(): SuiteRequest =
         SuiteRequest(SuiteMode.FULL, timeout = TimeoutConfig.LEGACY)
 
-    suspend fun <Ready : Any> run(
+    private suspend fun <Ready : Any> runInternal(
         request: SuiteRequest,
         models: List<HuggingFaceModel>,
         modelDirectory: File,
