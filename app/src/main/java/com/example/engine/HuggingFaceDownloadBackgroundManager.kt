@@ -377,7 +377,7 @@ class HuggingFaceModelDownloadForegroundService : Service() {
     private var processor: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private val activeDownloadJobs = ConcurrentHashMap<String, Job>()
-    private val cancelledByUserIds = ConcurrentHashMap.newKeySet<String>()
+    private val downloadLock = Any()
 
     override fun onCreate() {
         super.onCreate()
@@ -391,13 +391,12 @@ class HuggingFaceModelDownloadForegroundService : Service() {
             val modelId = intent.getStringExtra(HuggingFaceDownloadBackgroundManager.EXTRA_MODEL_ID)
             if (modelId != null) {
                 val model = HuggingFaceModelCatalog.find(modelId) ?: return START_NOT_STICKY
-                cancelledByUserIds.add(modelId)
-                val pending = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(this)
-                pending.remove(modelId)
-                HuggingFaceDownloadBackgroundManager.saveFallbackIds(this, pending)
-                activeDownloadJobs[modelId]?.cancel(
-                    CancellationException("Download wurde vom Nutzer abgebrochen.")
-                )
+                synchronized(downloadLock) {
+                    val pending = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(this)
+                    pending.remove(modelId)
+                    HuggingFaceDownloadBackgroundManager.saveFallbackIds(this, pending)
+                    activeDownloadJobs[modelId]?.cancel(CancellationException(USER_CANCEL_REASON))
+                }
                 HuggingFaceDownloadBackgroundManager.broadcastFailed(
                     this,
                     model,
@@ -412,11 +411,13 @@ class HuggingFaceModelDownloadForegroundService : Service() {
             return START_NOT_STICKY
         }
 
-        val pending = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(this)
-        intent?.getStringArrayListExtra(HuggingFaceDownloadBackgroundManager.EXTRA_MODEL_IDS)
-            ?.filter { HuggingFaceModelCatalog.find(it) != null }
-            ?.forEach { pending += it }
-        HuggingFaceDownloadBackgroundManager.saveFallbackIds(this, pending)
+        synchronized(downloadLock) {
+            val pending = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(this)
+            intent?.getStringArrayListExtra(HuggingFaceDownloadBackgroundManager.EXTRA_MODEL_IDS)
+                ?.filter { HuggingFaceModelCatalog.find(it) != null }
+                ?.forEach { pending += it }
+            HuggingFaceDownloadBackgroundManager.saveFallbackIds(this, pending)
+        }
 
         startForeground(
             NOTIFICATION_ID,
@@ -437,15 +438,22 @@ class HuggingFaceModelDownloadForegroundService : Service() {
                 batch.map { modelId ->
                     async {
                         val model = HuggingFaceModelCatalog.find(modelId) ?: return@async
-                        if (cancelledByUserIds.remove(modelId)) return@async
-
                         val ownJob = currentCoroutineContext()[Job]
-                        if (ownJob != null) activeDownloadJobs[modelId] = ownJob
-                        // Close the race where cancellation arrives immediately before the
-                        // child coroutine is registered in activeDownloadJobs.
-                        if (cancelledByUserIds.contains(modelId)) {
-                            ownJob?.cancel(CancellationException("Download wurde vom Nutzer abgebrochen."))
+                            ?: throw IllegalStateException("Download-Coroutine ohne Job-Kontext.")
+                        // Registration and queue removal are synchronized so a cancel action
+                        // cannot slip between checking the queue and registering the active job.
+                        val shouldRun = synchronized(downloadLock) {
+                            val pending = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(
+                                this@HuggingFaceModelDownloadForegroundService
+                            )
+                            if (modelId !in pending) {
+                                false
+                            } else {
+                                activeDownloadJobs[modelId] = ownJob
+                                true
+                            }
                         }
+                        if (!shouldRun) return@async
 
                         var finished = false
                         try {
@@ -463,7 +471,7 @@ class HuggingFaceModelDownloadForegroundService : Service() {
                         } catch (cancelled: CancellationException) {
                             // User cancellation is isolated to this model. System/service cancellation
                             // still propagates so the resumable .part file can be resumed later.
-                            if (cancelledByUserIds.remove(modelId)) {
+                            if (cancelled.message == USER_CANCEL_REASON) {
                                 finished = true
                             } else {
                                 throw cancelled
@@ -474,11 +482,18 @@ class HuggingFaceModelDownloadForegroundService : Service() {
                             )
                             finished = true
                         } finally {
-                            if (ownJob != null) activeDownloadJobs.remove(modelId, ownJob)
-                            if (finished) {
-                                val pending = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(this@HuggingFaceModelDownloadForegroundService)
-                                pending.remove(model.id)
-                                HuggingFaceDownloadBackgroundManager.saveFallbackIds(this@HuggingFaceModelDownloadForegroundService, pending)
+                            synchronized(downloadLock) {
+                                activeDownloadJobs.remove(modelId, ownJob)
+                                if (finished) {
+                                    val pending = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(
+                                        this@HuggingFaceModelDownloadForegroundService
+                                    )
+                                    pending.remove(model.id)
+                                    HuggingFaceDownloadBackgroundManager.saveFallbackIds(
+                                        this@HuggingFaceModelDownloadForegroundService,
+                                        pending
+                                    )
+                                }
                             }
                         }
                     }
@@ -512,6 +527,7 @@ class HuggingFaceModelDownloadForegroundService : Service() {
 
     private companion object {
         const val NOTIFICATION_ID = 41_699
+        const val USER_CANCEL_REASON = "LLMLAB_USER_CANCELLED"
     }
 }
 
