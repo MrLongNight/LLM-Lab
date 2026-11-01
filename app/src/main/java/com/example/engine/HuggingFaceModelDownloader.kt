@@ -63,7 +63,7 @@ class HuggingFaceModelDownloader(context: Context) {
         }
 
         try {
-            connection = (URL(model.downloadUrl).openConnection() as HttpURLConnection).apply {
+            val activeConnection = (URL(model.downloadUrl).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = 20_000
                 readTimeout = 30_000
@@ -72,8 +72,9 @@ class HuggingFaceModelDownloader(context: Context) {
                 setRequestProperty("Accept-Encoding", "identity")
                 if (offset > 0L) setRequestProperty("Range", "bytes=$offset-")
             }
+            connection = activeConnection
 
-            val response = connection.responseCode
+            val response = activeConnection.responseCode
             if (response == 416 && partial.isFile) {
                 val partialInfo = GgufMetadataParser.parse(partial)
                 val partialHash = if (partialInfo.isValid && partialInfo.tensorCount > 0L) sha256(partial) else ""
@@ -96,7 +97,7 @@ class HuggingFaceModelDownloader(context: Context) {
 
             val requestedOffset = offset
             val append = response == HttpURLConnection.HTTP_PARTIAL && requestedOffset > 0L
-            val contentRange = connection.getHeaderField("Content-Range")
+            val contentRange = activeConnection.getHeaderField("Content-Range")
             val rangeMatch = contentRange?.let {
                 Regex("^bytes\\s+(\\d+)-(\\d+)/(\\d+|\\*)$", RegexOption.IGNORE_CASE).matchEntire(it.trim())
             }
@@ -109,7 +110,7 @@ class HuggingFaceModelDownloader(context: Context) {
 
             // Some mirrors ignore Range and return a full HTTP 200 response. In that case restart cleanly.
             val startBytes = if (append) requestedOffset else 0L
-            val contentLength = connection.getHeaderFieldLong("Content-Length", -1L)
+            val contentLength = activeConnection.getHeaderFieldLong("Content-Length", -1L)
             val rangeTotal = rangeMatch?.groupValues?.getOrNull(3)?.takeUnless { it == "*" }?.toLongOrNull() ?: -1L
             val authoritativeTotalBytes = when {
                 rangeTotal > 0L -> rangeTotal
@@ -119,7 +120,7 @@ class HuggingFaceModelDownloader(context: Context) {
             val totalBytes = authoritativeTotalBytes.takeIf { it > 0L } ?: model.estimatedSizeBytes
 
             onProgress(startBytes, totalBytes)
-            connection.inputStream.use { rawInput ->
+            activeConnection.inputStream.use { rawInput ->
                 BufferedInputStream(rawInput, 1024 * 1024).use { input ->
                     FileOutputStream(partial, append).use { rawOutput ->
                         BufferedOutputStream(rawOutput, 1024 * 1024).use { output ->
