@@ -392,6 +392,7 @@ class HuggingFaceModelDownloadForegroundService : Service() {
                 batch.map { modelId ->
                     async {
                         val model = HuggingFaceModelCatalog.find(modelId) ?: return@async
+                        var finished = false
                         try {
                             HuggingFaceModelDownloader(applicationContext).download(model) { downloaded, total ->
                                 val progress = if (total > 0L) (downloaded * 100L / total).toInt().coerceIn(0, 100) else 0
@@ -403,16 +404,21 @@ class HuggingFaceModelDownloadForegroundService : Service() {
                                 HuggingFaceDownloadBackgroundManager.broadcastProgress(applicationContext, model, downloaded, total)
                             }
                             HuggingFaceDownloadBackgroundManager.broadcastCompleted(applicationContext, model)
+                            finished = true
                         } catch (cancelled: CancellationException) {
+                            // A system stop is resumable: retain the queued model ID and its .part file.
                             throw cancelled
                         } catch (error: Throwable) {
                             HuggingFaceDownloadBackgroundManager.broadcastFailed(
                                 applicationContext, model, error.message ?: error.javaClass.simpleName
                             )
+                            finished = true
                         } finally {
-                            val pending = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(this@HuggingFaceModelDownloadForegroundService)
-                            pending.remove(model.id)
-                            HuggingFaceDownloadBackgroundManager.saveFallbackIds(this@HuggingFaceModelDownloadForegroundService, pending)
+                            if (finished) {
+                                val pending = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(this@HuggingFaceModelDownloadForegroundService)
+                                pending.remove(model.id)
+                                HuggingFaceDownloadBackgroundManager.saveFallbackIds(this@HuggingFaceModelDownloadForegroundService, pending)
+                            }
                         }
                     }
                 }.awaitAll()
