@@ -8,7 +8,8 @@ data class PromptTestCase(
     val expectedKeywords: List<String>,
     val minimumOutputWords: Int = 0,
     val maxTokens: Int = 96,
-    val timeoutSec: Int = 180
+    val timeoutSec: Int = 180,
+    val timeoutKind: InferenceTimeoutKind = InferenceTimeoutKind.GENERAL
 )
 
 data class InferenceTestVariant(
@@ -121,7 +122,8 @@ object PromptTestCatalog {
             expectedKeywords = listOf("Dokument", "Suche", "Archiv"),
             minimumOutputWords = 40,
             maxTokens = 112,
-            timeoutSec = 180
+            timeoutSec = 180,
+            timeoutKind = InferenceTimeoutKind.PERFORMANCE
         ),
         PromptTestCase(
             id = "TEST_DMS",
@@ -130,7 +132,8 @@ object PromptTestCatalog {
             prompt = "Erkläre in genau zwei kurzen, grammatikalisch korrekten deutschen Sätzen, was ein Dokumentenmanagementsystem ist und welchen Nutzen es bietet.",
             expectedKeywords = listOf("Dokument", "System"),
             maxTokens = 96,
-            timeoutSec = 180
+            timeoutSec = 180,
+            timeoutKind = InferenceTimeoutKind.DMS
         ),
         PromptTestCase(
             id = "TEST_EXTRACTION",
@@ -139,7 +142,8 @@ object PromptTestCatalog {
             prompt = "Extrahiere ausschließlich ein valides JSON-Objekt mit exakt den Feldern sender, documentType, date, invoiceNumber, totalAmount, iban und poNumber. Verwende für date ISO yyyy-MM-dd, für totalAmount eine Zahl ohne Währungszeichen und für fehlende Werte exakt JSON-null. Eine Rechnungsnummer ist keine Bestellnummer. Dokument:\n$sampleLetterText",
             expectedKeywords = listOf("sender", "documentType", "date"),
             maxTokens = 112,
-            timeoutSec = 240
+            timeoutSec = 240,
+            timeoutKind = InferenceTimeoutKind.EXTRACTION
         ),
         PromptTestCase(
             id = "TEST_TUNING",
@@ -148,7 +152,8 @@ object PromptTestCatalog {
             prompt = "Ein Dokument wird lokal als PDF gespeichert. OCR wandelt den sichtbaren Inhalt in maschinenlesbaren Text um. Dieser Text wird für die Volltextsuche indexiert. Metadaten wie Absender und Datum werden nur übernommen, wenn sie im Dokument stehen. Erkläre in einem kurzen deutschen Satz den Zweck von OCR.",
             expectedKeywords = listOf("OCR"),
             maxTokens = 40,
-            timeoutSec = 180
+            timeoutSec = 180,
+            timeoutKind = InferenceTimeoutKind.PERFORMANCE
         ),
         PromptTestCase(
             id = "TEST_SAMPLING",

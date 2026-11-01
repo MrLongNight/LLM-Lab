@@ -13,6 +13,7 @@ import com.example.engine.BackendPreference
 import com.example.engine.InferenceCallback
 import com.example.engine.LlamaNativeBridge
 import com.example.engine.ProfilePreset
+import com.example.engine.TimeoutConfig
 import com.example.engine.PromptTestCatalog
 import com.example.ui.LLMLabViewModel
 import com.example.ui.ModelLifecycleState
@@ -112,7 +113,7 @@ class ExampleRobolectricTest {
     @Test
     fun `verify LLMLabViewModel initial state and presets`() {
         val app = ApplicationProvider.getApplicationContext<Application>()
-        val viewModel = LLMLabViewModel(app)
+        val viewModel = LLMLabViewModel(app, TimeoutConfig.LEGACY)
 
         assertNotNull(viewModel.modelState.value)
         assertEquals(0, viewModel.currentTab.value)
@@ -217,7 +218,7 @@ class ExampleRobolectricTest {
     @Test
     fun `chat context mismatch does not leave a streaming placeholder`() {
         val app = ApplicationProvider.getApplicationContext<Application>()
-        val viewModel = LLMLabViewModel(app)
+        val viewModel = LLMLabViewModel(app, TimeoutConfig.LEGACY)
         val currentConfig = viewModel.config.value
 
         val modelStateField = LLMLabViewModel::class.java.getDeclaredField("_modelState")

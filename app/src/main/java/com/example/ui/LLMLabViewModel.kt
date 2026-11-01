@@ -32,6 +32,9 @@ import com.example.engine.PromptTestCase
 import com.example.engine.InferenceTestVariant
 import com.example.engine.SystemTelemetry
 import com.example.engine.SystemTelemetryManager
+import com.example.engine.TimeoutConfig
+import com.example.engine.TimeoutController
+import com.example.engine.InferenceTimeoutKind
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -134,11 +137,15 @@ data class BenchmarkSummary(
     val stopReason: String? = null
 )
 
-class LLMLabViewModel(application: Application) : AndroidViewModel(application) {
+class LLMLabViewModel @JvmOverloads constructor(
+    application: Application,
+    private val timeoutConfig: TimeoutConfig = TimeoutConfig.MOBILE
+) : AndroidViewModel(application) {
 
     private val db = AppDatabase.getInstance(application)
     private val dao = db.testRunDao()
     private val nativeBridge = LlamaNativeBridge(application.applicationInfo.nativeLibraryDir)
+    private val timeoutController = TimeoutController(timeoutConfig)
     private val huggingFaceDownloader = HuggingFaceModelDownloader(application)
     private val automatedSuiteCoordinator = AutomatedModelSuiteCoordinator()
     private val _downloadedModelIds = MutableStateFlow<Set<String>>(emptySet())
@@ -298,22 +305,24 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
         prompt: String,
         config: InferenceConfig,
         callback: InferenceCallback,
-        timeoutSeconds: Int
+        timeoutKind: InferenceTimeoutKind,
+        requestedTimeoutMs: Long
     ): NativeMetrics {
-        val timedOut = AtomicBoolean(false)
         val operation = activeInferenceJob
-        val watchdog = viewModelScope.launch(Dispatchers.Default) {
-            delay(timeoutSeconds.coerceAtLeast(1) * 1000L)
-            timedOut.set(true)
-            _modelState.value = ModelLifecycleState.Aborting
-            nativeBridge.requestAbort()
-            monitorNativeAbortResponsiveness(operation, "Inferenz-Timeout")
-        }
-
+        val timeoutSession = timeoutController.startInferenceWatchdog(
+            scope = viewModelScope,
+            kind = timeoutKind,
+            requestedLimitMs = requestedTimeoutMs,
+            onTimeout = {
+                _modelState.value = ModelLifecycleState.Aborting
+                nativeBridge.requestAbort()
+                monitorNativeAbortResponsiveness(operation, "Inferenz-Timeout")
+            }
+        )
         return try {
             val nativeMetrics = try {
                 beginNativeCall()
-                nativeBridge.executeInference(prompt, config, callback)
+                nativeBridge.executeInference(prompt, config, timeoutSession.wrap(callback))
             } finally {
                 endNativeCall()
             }
@@ -322,17 +331,17 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     finishReason = "NATIVE_ERROR",
                     errorMessage = "Die native Engine hat das Abbruchsignal nicht rechtzeitig quittiert. App-Neustart erforderlich."
                 )
-                timedOut.get() -> nativeMetrics.copy(
+                timeoutSession.isTimedOut -> nativeMetrics.copy(
                     finishReason = "TIMEOUT",
                     errorMessage = listOfNotNull(
-                        "Timeout nach ${timeoutSeconds.coerceAtLeast(1)}s; nativer Abbruch wurde angefordert.",
+                        timeoutSession.reason ?: "Inferenz-Zeitlimit erreicht.",
                         nativeMetrics.errorMessage
                     ).joinToString(" ")
                 )
                 else -> nativeMetrics
             }
         } finally {
-            watchdog.cancel()
+            timeoutSession.cancel()
         }
     }
 
@@ -527,15 +536,19 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
 
         launchEngineOperation {
             val startTime = System.currentTimeMillis()
-            val timeoutSeconds = _config.value.timeoutInitSec.coerceAtLeast(1)
             val timedOut = AtomicBoolean(false)
-            val watchdog = viewModelScope.launch(Dispatchers.Default) {
-                delay(timeoutSeconds * 1000L)
+            val watchdog = timeoutController.startModelInitializationWatchdog(
+                scope = viewModelScope,
+                requestedLimitMs = java.util.concurrent.TimeUnit.SECONDS.toMillis(
+                    _config.value.timeoutInitSec.coerceAtLeast(1).toLong()
+                )
+            ) {
                 timedOut.set(true)
                 _modelState.value = ModelLifecycleState.Aborting
                 nativeBridge.requestAbort()
                 monitorNativeAbortResponsiveness(activeInferenceJob, "Modellinitialisierung")
             }
+            val timeoutMs = watchdog.timeoutMs
 
             try {
                 _modelState.value = ModelLifecycleState.Initializing(
@@ -645,7 +658,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 if (timedOut.get() || nativeBridge.isAbortRequested()) {
                     if (loadSuccess) nativeBridge.unloadModel()
                     _modelState.value = ModelLifecycleState.Error(
-                        if (timedOut.get()) "TIMEOUT: Modellinitialisierung überschritt ${timeoutSeconds}s."
+                        if (timedOut.get()) "TIMEOUT: Modellinitialisierung überschritt ${timeoutMs / 1_000L}s."
                         else "Modellinitialisierung wurde abgebrochen."
                     )
                 } else if (!loadSuccess) {
@@ -672,7 +685,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 File(getApplication<Application>().filesDir, "active_model.gguf.part").delete()
                 val message = when {
                     nativeEngineUnresponsive.get() -> "Die native Modellinitialisierung reagiert nicht mehr. Bitte App neu starten."
-                    timedOut.get() -> "TIMEOUT: Modellinitialisierung überschritt ${timeoutSeconds}s."
+                    timedOut.get() -> "TIMEOUT: Modellinitialisierung überschritt ${timeoutMs / 1_000L}s."
                     nativeBridge.isAbortRequested() -> "Modellinitialisierung wurde durch den Nutzer abgebrochen."
                     else -> "Initialisierungsfehler: ${e.message}"
                 }
@@ -775,7 +788,10 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 prompt = promptText,
                 config = currentConfig,
                 callback = callback,
-                timeoutSeconds = currentConfig.timeoutNormalInferenceSec
+                timeoutKind = InferenceTimeoutKind.GENERAL,
+                requestedTimeoutMs = java.util.concurrent.TimeUnit.SECONDS.toMillis(
+                    currentConfig.timeoutNormalInferenceSec.coerceAtLeast(1).toLong()
+                )
             )
             val response = streamedResponse.toString()
 
@@ -901,15 +917,19 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             return null
         }
 
-        val timeoutSeconds = config.timeoutInitSec.coerceAtLeast(1)
         val timedOut = AtomicBoolean(false)
-        val watchdog = viewModelScope.launch(Dispatchers.Default) {
-            delay(timeoutSeconds * 1000L)
+        val watchdog = timeoutController.startModelInitializationWatchdog(
+            scope = viewModelScope,
+            requestedLimitMs = java.util.concurrent.TimeUnit.SECONDS.toMillis(
+                config.timeoutInitSec.coerceAtLeast(1).toLong()
+            )
+        ) {
             timedOut.set(true)
             _modelState.value = ModelLifecycleState.Aborting
             nativeBridge.requestAbort()
             monitorNativeAbortResponsiveness(activeInferenceJob, "Testprofil-Konfiguration")
         }
+        val timeoutMs = watchdog.timeoutMs
 
         try {
             _modelState.value = ModelLifecycleState.Initializing(
@@ -944,7 +964,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 if (timedOut.get() || nativeBridge.isAbortRequested()) {
                     _modelState.value = ModelLifecycleState.Error(
-                        if (timedOut.get()) "TIMEOUT: Context-Neukonfiguration überschritt ${timeoutSeconds}s."
+                        if (timedOut.get()) "TIMEOUT: Context-Neukonfiguration überschritt ${timeoutMs / 1_000L}s."
                         else errors[0] ?: "Context-Neukonfiguration wurde abgebrochen."
                     )
                     return null
@@ -968,7 +988,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             if (timedOut.get() || nativeBridge.isAbortRequested()) {
                 if (loaded) nativeBridge.unloadModel()
                 _modelState.value = ModelLifecycleState.Error(
-                    if (timedOut.get()) "TIMEOUT: Modellinitialisierung des Testprofils überschritt ${timeoutSeconds}s."
+                    if (timedOut.get()) "TIMEOUT: Modellinitialisierung des Testprofils überschritt ${timeoutMs / 1_000L}s."
                     else "Modellinitialisierung des Testprofils wurde abgebrochen."
                 )
                 return null
@@ -1192,7 +1212,10 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     prompt = testCase.prompt,
                     config = configForTest,
                     callback = callback,
-                    timeoutSeconds = testCase.timeoutSec
+                    timeoutKind = testCase.timeoutKind,
+                    requestedTimeoutMs = java.util.concurrent.TimeUnit.SECONDS.toMillis(
+                        testCase.timeoutSec.coerceAtLeast(1).toLong()
+                    )
                 )
                 val wallDurationMs = (SystemClock.elapsedRealtime() - wallTimeBeforeMs).coerceAtLeast(1L)
                 val cpuDurationMs = (android.os.Process.getElapsedCpuTime() - cpuTimeBeforeMs).coerceAtLeast(0L)
@@ -1293,14 +1316,18 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             null, "Automatischer Modellwechsel: ${file.name} wird geladen…", 0
         )
         val startedAt = SystemClock.elapsedRealtime()
-        val timeout = config.timeoutInitSec.coerceAtLeast(1)
         val timedOut = AtomicBoolean(false)
-        val watchdog = viewModelScope.launch(Dispatchers.Default) {
-            delay(timeout * 1000L)
+        val watchdog = timeoutController.startModelInitializationWatchdog(
+            scope = viewModelScope,
+            requestedLimitMs = java.util.concurrent.TimeUnit.SECONDS.toMillis(
+                config.timeoutInitSec.coerceAtLeast(1).toLong()
+            )
+        ) {
             timedOut.set(true)
             nativeBridge.requestAbort()
             monitorNativeAbortResponsiveness(activeInferenceJob, "Automatischer Qwen-Modellwechsel")
         }
+        val timeoutMs = watchdog.timeoutMs
         try {
             val errors = arrayOfNulls<String>(1)
             val loaded = try {
@@ -1312,7 +1339,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             if (timedOut.get() || nativeBridge.isAbortRequested()) {
                 if (loaded) nativeBridge.unloadModel()
                 _modelState.value = ModelLifecycleState.Error(
-                    if (timedOut.get()) "TIMEOUT: ${file.name} konnte nicht innerhalb von $timeout Sekunden geladen werden."
+                    if (timedOut.get()) "TIMEOUT: ${file.name} konnte nicht innerhalb von ${timeoutMs / 1_000L} Sekunden geladen werden."
                     else "Modellwechsel zu ${file.name} wurde abgebrochen."
                 )
                 return null
@@ -1395,7 +1422,13 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
         val quickConfig = config.copy(maxTokens = 12)
-        val metrics = executeInferenceWithWatchdog(prompt, quickConfig, callback, testCase.timeoutSec)
+        val metrics = executeInferenceWithWatchdog(
+            prompt,
+            quickConfig,
+            callback,
+            InferenceTimeoutKind.PERFORMANCE,
+            java.util.concurrent.TimeUnit.SECONDS.toMillis(testCase.timeoutSec.coerceAtLeast(1).toLong())
+        )
         val passed = AutomatedModelSuitePlan.quickCheckPassed(
             activeBackendName = backendName,
             gpuWeightLayerCount = gpuWeightLayerCount,
@@ -1663,7 +1696,10 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     prompt = prompt,
                     config = config,
                     callback = callback,
-                    timeoutSeconds = config.timeoutStressTestSec
+                    timeoutKind = InferenceTimeoutKind.PERFORMANCE,
+                    requestedTimeoutMs = java.util.concurrent.TimeUnit.SECONDS.toMillis(
+                        config.timeoutStressTestSec.coerceAtLeast(1).toLong()
+                    )
                 )
                 val inferenceCompleted =
                     (metrics.finishReason == "STOP_TOKEN" || metrics.finishReason == "MAX_TOKENS") &&
