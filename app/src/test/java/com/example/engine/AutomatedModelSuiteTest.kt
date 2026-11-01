@@ -104,12 +104,17 @@ class AutomatedModelSuiteTest {
             onProgress = { finalProgress = it },
             onOutput = {},
             downloadModel = { _, _, _ -> },
-            loadModel = { file, _, _ ->
+            loadModel = { file, _, timeout ->
+                assertEquals(TimeoutConfig.LEGACY, timeout)
                 loadedFiles += file.name
                 file.name
             },
-            quickCheck = { _, _, _, _, _ -> true },
-            runWorkflow = { testCase, ready, _ ->
+            quickCheck = { _, _, _, _, timeout ->
+                assertEquals(TimeoutConfig.LEGACY, timeout)
+                true
+            },
+            runWorkflow = { testCase, ready, _, timeout ->
+                assertEquals(TimeoutConfig.LEGACY, timeout)
                 fullRuns += "${ready}:${testCase.id}"
                 AutomatedWorkflowResult(actualRuns = 1, succeeded = true)
             }
