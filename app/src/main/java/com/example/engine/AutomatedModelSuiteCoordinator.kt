@@ -1,6 +1,9 @@
 package com.example.engine
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import java.io.File
 
 enum class SuiteMode { SINGLE, QUICK, FULL }
@@ -170,15 +173,21 @@ class AutomatedModelSuiteCoordinator {
                 "DOWNLOAD",
                 "$modeLabel lädt ${models.size} Modell(e); danach exakt 3 Workflows: $workflowIds. Accelerator=AUTO."
             )
-            for ((index, model) in models.withIndex()) {
-                if (isAborted()) throw CancellationException("Download durch Nutzer abgebrochen.")
-                publish(
-                    "DOWNLOAD",
-                    "Download $modeLabel ${index + 1}/${models.size}: ${model.filename}",
-                    modelIndex = index + 1,
-                    modelName = model.title
-                )
-                downloadModel(model, index + 1, models.size)
+            models.withIndex().toList().chunked(MAX_PARALLEL_DOWNLOADS).forEach { batch ->
+                coroutineScope {
+                    batch.map { (index, model) ->
+                        async {
+                            if (isAborted()) throw CancellationException("Download durch Nutzer abgebrochen.")
+                            publish(
+                                "DOWNLOAD",
+                                "Download $modeLabel ${index + 1}/${models.size}: ${model.filename}",
+                                modelIndex = index + 1,
+                                modelName = model.title
+                            )
+                            downloadModel(model, index + 1, models.size)
+                        }
+                    }.awaitAll()
+                }
             }
 
             publish(
@@ -300,17 +309,23 @@ class AutomatedModelSuiteCoordinator {
 
         try {
             require(models.isNotEmpty()) { "Der Modellkatalog enthält keine Modelle." }
-            publish("DOWNLOAD", "Lade/prüfe nacheinander alle ${models.size} Qwen-GGUF-Dateien.")
+            publish("DOWNLOAD", "Lade/prüfe ${models.size} Qwen-GGUF-Dateien in 2er-Gruppen (maximal $MAX_PARALLEL_DOWNLOADS parallele Downloads).")
 
-            for ((index, model) in models.withIndex()) {
-                if (isAborted()) throw CancellationException("Die Testreihe wurde vor dem Download abgebrochen.")
-                publish(
-                    "DOWNLOAD",
-                    "Download ${index + 1}/${models.size}: ${model.filename}",
-                    modelIndex = index + 1,
-                    modelName = "${model.title} · ${model.parameters} · ${model.quantization}"
-                )
-                downloadModel(model, index + 1, models.size)
+            models.withIndex().toList().chunked(MAX_PARALLEL_DOWNLOADS).forEach { batch ->
+                coroutineScope {
+                    batch.map { (index, model) ->
+                        async {
+                            if (isAborted()) throw CancellationException("Die Testreihe wurde vor dem Download abgebrochen.")
+                            publish(
+                                "DOWNLOAD",
+                                "Download ${index + 1}/${models.size}: ${model.filename}",
+                                modelIndex = index + 1,
+                                modelName = "${model.title} · ${model.parameters} · ${model.quantization}"
+                            )
+                            downloadModel(model, index + 1, models.size)
+                        }
+                    }.awaitAll()
+                }
             }
 
             publish("QUICK_CHECK", "Alle Dateien sind geprüft. Starte den Quick-Preflight für jedes Modell.")
@@ -441,6 +456,7 @@ class AutomatedModelSuiteCoordinator {
     }
 
     companion object {
+        const val MAX_PARALLEL_DOWNLOADS = 2
         fun shouldRunFullRoutine(
             requested: Boolean,
             quickPassed: Int,
