@@ -14,7 +14,6 @@ import com.example.engine.ExportManager
 import com.example.engine.GgufInfo
 import com.example.engine.GgufMetadataParser
 import com.example.engine.HuggingFaceModelCatalog
-import com.example.engine.HuggingFaceModelDownloader
 import com.example.engine.HuggingFaceDownloadBackgroundManager
 import com.example.engine.AutomatedModelSuitePlan
 import com.example.engine.AutomatedModelSuiteCoordinator
@@ -147,7 +146,6 @@ class LLMLabViewModel @JvmOverloads constructor(
     private val dao = db.testRunDao()
     private val nativeBridge = NativeInferenceEngine(application)
     private val timeoutController = TimeoutController(timeoutConfig)
-    private val huggingFaceDownloader = HuggingFaceModelDownloader(application)
     private val automatedSuiteCoordinator = AutomatedModelSuiteCoordinator()
     private val _downloadedModelIds = MutableStateFlow<Set<String>>(emptySet())
     val downloadedModelIds: StateFlow<Set<String>> = _downloadedModelIds.asStateFlow()
