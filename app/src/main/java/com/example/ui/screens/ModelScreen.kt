@@ -33,7 +33,8 @@ fun ModelScreen(viewModel: LLMLabViewModel) {
     val modelState by viewModel.modelState.collectAsState()
     val config by viewModel.config.collectAsState()
     val downloadedModelIds by viewModel.downloadedModelIds.collectAsState()
-    val huggingFaceDownload by viewModel.huggingFaceDownload.collectAsState()
+    val huggingFaceDownloads by viewModel.huggingFaceDownloads.collectAsState()
+    val activeDownloadCount = huggingFaceDownloads.values.count { it.isDownloading }
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -106,7 +107,8 @@ fun ModelScreen(viewModel: LLMLabViewModel) {
         HuggingFaceModelsCard(
             viewModel = viewModel,
             downloadedModelIds = downloadedModelIds,
-            downloadState = huggingFaceDownload
+            downloadStates = huggingFaceDownloads,
+            activeDownloadCount = activeDownloadCount
         )
 
         // Dateiauswahl & Aktionen
@@ -139,7 +141,7 @@ fun ModelScreen(viewModel: LLMLabViewModel) {
                     Button(
                         onClick = { filePicker.launch(arrayOf("*/*")) },
                         colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
-                        enabled = !huggingFaceDownload.isDownloading,
+                        enabled = activeDownloadCount == 0,
                         modifier = Modifier
                             .weight(1f)
                             .testTag("select_model_file_button")
@@ -326,7 +328,8 @@ fun ModelScreen(viewModel: LLMLabViewModel) {
 private fun HuggingFaceModelsCard(
     viewModel: LLMLabViewModel,
     downloadedModelIds: Set<String>,
-    downloadState: com.example.ui.HuggingFaceDownloadUiState,
+    downloadStates: Map<String, com.example.ui.HuggingFaceDownloadUiState>,
+    activeDownloadCount: Int
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -339,6 +342,7 @@ private fun HuggingFaceModelsCard(
         ) {
             Text("QWEN-MODELLE VON HUGGING FACE", color = NeonCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
             Text("Direkt herunterladen und lokal verwenden", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text("Maximal zwei Modell-Downloads gleichzeitig. Die Downloads laufen im Hintergrund weiter.", color = TextSecondary, fontSize = 12.sp)
             Text(
                 "Vier offizielle Qwen2.5-Instruct-GGUF-Dateien für den kontrollierten Vergleich von 0.5B/1.5B und Q4_0/Q4_K_M. Alle vier benötigen zusammen rund 3,1 GB Speicher. Download nur auf ausdrücklichen Tastendruck; danach läuft die Inferenz lokal. Lizenz: Apache-2.0.",
                 color = TextSecondary,
@@ -347,7 +351,8 @@ private fun HuggingFaceModelsCard(
 
             HuggingFaceModelCatalog.models.forEach { model ->
                 val downloaded = model.id in downloadedModelIds
-                val isActiveDownload = downloadState.modelId == model.id && downloadState.isDownloading
+                val downloadState = downloadStates[model.id] ?: com.example.ui.HuggingFaceDownloadUiState(modelId = model.id)
+                val isActiveDownload = downloadState.isDownloading
                 Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -361,12 +366,12 @@ private fun HuggingFaceModelsCard(
                         Button(
                             onClick = {
                                 when {
-                                    isActiveDownload -> viewModel.cancelHuggingFaceDownload()
+                                    isActiveDownload -> viewModel.cancelHuggingFaceDownload(model.id)
                                     downloaded -> viewModel.selectDownloadedHuggingFaceModel(model.id)
                                     else -> viewModel.downloadHuggingFaceModel(model.id)
                                 }
                             },
-                            enabled = isActiveDownload || !downloadState.isDownloading,
+                            enabled = isActiveDownload || downloaded || activeDownloadCount < 2,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = if (isActiveDownload) LaserCrimson else if (downloaded) MatrixGreen else NeonCyan,
                                 contentColor = Color.Black,
@@ -404,10 +409,10 @@ private fun HuggingFaceModelsCard(
                             fontFamily = FontFamily.Monospace
                         )
                     }
-                    if (downloadState.modelId == model.id) {
-                        downloadState.message?.let { Text(it, color = if (downloadState.error == null) TextSecondary else LaserCrimson, fontSize = 11.sp) }
-                        downloadState.error?.let { Text(it, color = LaserCrimson, fontSize = 12.sp) }
+                    if (downloadState.message != null) {
+                        Text(downloadState.message, color = if (downloadState.error == null) TextSecondary else LaserCrimson, fontSize = 11.sp)
                     }
+                    downloadState.error?.let { Text(it, color = LaserCrimson, fontSize = 12.sp) }
                 }
                 if (model != HuggingFaceModelCatalog.models.last()) {
                     HorizontalDivider(color = DarkCardBorder)

@@ -36,6 +36,7 @@ import com.example.engine.TimeoutConfig
 import com.example.engine.TimeoutController
 import com.example.engine.InferenceTimeoutKind
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -43,6 +44,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -50,6 +52,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InterruptedIOException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.text.DecimalFormat
@@ -149,12 +152,11 @@ class LLMLabViewModel @JvmOverloads constructor(
     private val automatedSuiteCoordinator = AutomatedModelSuiteCoordinator()
     private val _downloadedModelIds = MutableStateFlow<Set<String>>(emptySet())
     val downloadedModelIds: StateFlow<Set<String>> = _downloadedModelIds.asStateFlow()
-    private val _huggingFaceDownload = MutableStateFlow(HuggingFaceDownloadUiState())
-    val huggingFaceDownload: StateFlow<HuggingFaceDownloadUiState> = _huggingFaceDownload.asStateFlow()
+    private val _huggingFaceDownloads = MutableStateFlow<Map<String, HuggingFaceDownloadUiState>>(emptyMap())
+    val huggingFaceDownloads: StateFlow<Map<String, HuggingFaceDownloadUiState>> = _huggingFaceDownloads.asStateFlow()
     private val _automatedSuite = MutableStateFlow(AutomatedModelSuiteUiState())
     val automatedSuite: StateFlow<AutomatedModelSuiteUiState> = _automatedSuite.asStateFlow()
-    private var huggingFaceDownloadJob: Job? = null
-    @Volatile private var activeHuggingFaceDownloadId: String? = null
+    private val huggingFaceDownloadJobs = ConcurrentHashMap<String, Job>()
 
     private val _currentTab = MutableStateFlow(0)
     val currentTab: StateFlow<Int> = _currentTab.asStateFlow()
@@ -483,62 +485,87 @@ class LLMLabViewModel @JvmOverloads constructor(
 
     fun downloadHuggingFaceModel(modelId: String) {
         val model = HuggingFaceModelCatalog.find(modelId) ?: return
-        if (huggingFaceDownloadJob?.isActive == true) return
-        activeHuggingFaceDownloadId = model.id
+        if (_automatedSuite.value.isRunning || huggingFaceDownloadJobs.containsKey(model.id)) return
+        val currentActive = _huggingFaceDownloads.value.values.count { it.isDownloading }
+        if (currentActive >= AutomatedModelSuiteCoordinator.MAX_PARALLEL_DOWNLOADS) {
+            _huggingFaceDownloads.update { current ->
+                current + (model.id to HuggingFaceDownloadUiState(
+                    modelId = model.id,
+                    message = "Maximal zwei Modell-Downloads können gleichzeitig laufen."
+                ))
+            }
+            return
+        }
 
-        huggingFaceDownloadJob = viewModelScope.launch(Dispatchers.IO) {
-            _huggingFaceDownload.value = HuggingFaceDownloadUiState(
+        _huggingFaceDownloads.update { current ->
+            current + (model.id to HuggingFaceDownloadUiState(
                 modelId = model.id,
                 isDownloading = true,
                 message = "Hintergrund-Download wird eingeplant…"
-            )
+            ))
+        }
+
+        // LAZY ensures the Job is registered before it can finish or be cancelled.
+        val job = viewModelScope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             try {
                 val file = HuggingFaceDownloadBackgroundManager.download(getApplication(), model) { downloaded, total ->
-                    _huggingFaceDownload.value = HuggingFaceDownloadUiState(
-                        modelId = model.id,
-                        downloadedBytes = downloaded,
-                        totalBytes = total,
-                        isDownloading = true,
-                        message = if (total > 0L && downloaded >= total) {
-                            "Prüfe SHA-256 und GGUF-Header…"
-                        } else {
-                            "Hintergrund-Download läuft…"
-                        }
-                    )
+                    _huggingFaceDownloads.update { current ->
+                        current + (model.id to HuggingFaceDownloadUiState(
+                            modelId = model.id,
+                            downloadedBytes = downloaded,
+                            totalBytes = total,
+                            isDownloading = true,
+                            message = if (total > 0L && downloaded >= total) {
+                                "Prüfe SHA-256 und GGUF-Header…"
+                            } else {
+                                "Hintergrund-Download läuft…"
+                            }
+                        ))
+                    }
                 }
                 _downloadedModelIds.value = _downloadedModelIds.value + model.id
-                _huggingFaceDownload.value = HuggingFaceDownloadUiState(
-                    modelId = model.id,
-                    downloadedBytes = file.length(),
-                    totalBytes = file.length(),
-                    isDownloading = false,
-                    message = "Download und SHA-256-Prüfung erfolgreich. Modell ist lokal verfügbar."
-                )
-                onModelFileSelected(Uri.fromFile(file))
+                _huggingFaceDownloads.update { current ->
+                    current + (model.id to HuggingFaceDownloadUiState(
+                        modelId = model.id,
+                        downloadedBytes = file.length(),
+                        totalBytes = file.length(),
+                        isDownloading = false,
+                        message = "Download und SHA-256-Prüfung erfolgreich. Modell ist lokal verfügbar."
+                    ))
+                }
+                // When two downloads are started together, let the user explicitly select
+                // the finished model. A single download keeps the previous auto-select flow.
+                if (huggingFaceDownloadJobs.size == 1) onModelFileSelected(Uri.fromFile(file))
             } catch (cancelled: CancellationException) {
-                _huggingFaceDownload.value = HuggingFaceDownloadUiState(
-                    modelId = model.id,
-                    isDownloading = false,
-                    message = "Download wird im Hintergrund fortgesetzt; vorhandene Bytes bleiben erhalten."
-                )
+                _huggingFaceDownloads.update { current ->
+                    current + (model.id to HuggingFaceDownloadUiState(
+                        modelId = model.id,
+                        isDownloading = false,
+                        message = "Download abgebrochen. Vorhandene Bytes bleiben zum Fortsetzen erhalten."
+                    ))
+                }
                 throw cancelled
             } catch (error: Exception) {
-                _huggingFaceDownload.value = HuggingFaceDownloadUiState(
-                    modelId = model.id,
-                    isDownloading = false,
-                    message = "Download fehlgeschlagen.",
-                    error = error.message ?: "Unbekannter Download-Fehler"
-                )
+                _huggingFaceDownloads.update { current ->
+                    current + (model.id to HuggingFaceDownloadUiState(
+                        modelId = model.id,
+                        isDownloading = false,
+                        message = "Download fehlgeschlagen.",
+                        error = error.message ?: "Unbekannter Download-Fehler"
+                    ))
+                }
             } finally {
-                activeHuggingFaceDownloadId = null
+                huggingFaceDownloadJobs.remove(model.id)
                 refreshDownloadedModels()
             }
         }
+        huggingFaceDownloadJobs[model.id] = job
+        job.start()
     }
 
-    fun cancelHuggingFaceDownload() {
-        activeHuggingFaceDownloadId?.let { HuggingFaceDownloadBackgroundManager.cancel(getApplication(), it) }
-        huggingFaceDownloadJob?.cancel()
+    fun cancelHuggingFaceDownload(modelId: String) {
+        HuggingFaceDownloadBackgroundManager.cancel(getApplication(), modelId)
+        huggingFaceDownloadJobs[modelId]?.cancel()
     }
 
     fun initializeModel() {
@@ -1503,7 +1530,7 @@ class LLMLabViewModel @JvmOverloads constructor(
     fun runSingleModel(modelId: String) = runQwenModelSuite(automatedSuiteCoordinator.runSingle(modelId))
 
     private fun runQwenModelSuite(request: com.example.engine.SuiteRequest) {
-        if (_automatedSuite.value.isRunning || huggingFaceDownloadJob?.isActive == true) return
+        if (_automatedSuite.value.isRunning || huggingFaceDownloadJobs.values.any { it.isActive }) return
         if (nativeEngineUnresponsive.get()) {
             _automatedSuite.value = _automatedSuite.value.copy(
                 isRunning = false,
@@ -1628,26 +1655,30 @@ class LLMLabViewModel @JvmOverloads constructor(
                             if (automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()) {
                                 throw CancellationException("Automatische Testreihe wurde während des Downloads abgebrochen.")
                             }
-                            _huggingFaceDownload.value = HuggingFaceDownloadUiState(
-                                modelId = model.id,
-                                downloadedBytes = downloaded,
-                                totalBytes = total,
-                                isDownloading = true,
-                                message = "Automatischer Download $index/$count"
-                            )
+                            _huggingFaceDownloads.update { current ->
+                                current + (model.id to HuggingFaceDownloadUiState(
+                                    modelId = model.id,
+                                    downloadedBytes = downloaded,
+                                    totalBytes = total,
+                                    isDownloading = true,
+                                    message = "Automatischer Download $index/$count"
+                                ))
+                            }
                         }
                         _downloadedModelIds.value = _downloadedModelIds.value + model.id
-                        _huggingFaceDownload.value = HuggingFaceDownloadUiState(
-                            modelId = model.id,
-                            downloadedBytes = file.length(),
-                            totalBytes = file.length(),
-                            isDownloading = false,
-                            message = if (existing != null) {
-                                "Vorhandene lokale Datei wiederverwendet; kein erneuter Download."
-                            } else {
-                                "Download und SHA-256-Prüfung erfolgreich."
-                            }
-                        )
+                        _huggingFaceDownloads.update { current ->
+                            current + (model.id to HuggingFaceDownloadUiState(
+                                modelId = model.id,
+                                downloadedBytes = file.length(),
+                                totalBytes = file.length(),
+                                isDownloading = false,
+                                message = if (existing != null) {
+                                    "Vorhandene lokale Datei wiederverwendet; kein erneuter Download."
+                                } else {
+                                    "Download und SHA-256-Prüfung erfolgreich."
+                                }
+                            ))
+                        }
                     },
                     loadModel = { file, config, timeout ->
                         val model = models.firstOrNull { it.filename == file.name }
@@ -1708,7 +1739,14 @@ class LLMLabViewModel @JvmOverloads constructor(
                         _config.value = previousConfig
                     }
                 }
-                _huggingFaceDownload.value = _huggingFaceDownload.value.copy(isDownloading = false)
+                _huggingFaceDownloads.update { current ->
+                    current.mapValues { (_, state) ->
+                        if (state.isDownloading) state.copy(
+                            isDownloading = false,
+                            message = state.message ?: "Suite beendet."
+                        ) else state
+                    }
+                }
                 refreshDownloadedModels()
             }
         }
