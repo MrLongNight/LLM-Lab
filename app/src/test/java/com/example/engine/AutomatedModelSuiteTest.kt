@@ -61,22 +61,21 @@ class AutomatedModelSuiteTest {
         val fullRuns = mutableListOf<String>()
         var finalProgress = AutomatedModelSuiteProgress()
 
-        coordinator.execute(
+        coordinator.run(SuiteRequest(SuiteMode.FULL),
             models = models,
             modelDirectory = java.io.File("unused-model-directory"),
             config = InferenceConfig.fromPreset(ProfilePreset.BALANCED),
             fullRoutine = listOf(PromptTestCase("TEST_DMS", "DMS", "", "Prompt", emptyList())),
-            runFullAfterQuickCheck = true,
             isAborted = { false },
             onProgress = { finalProgress = it },
             onOutput = {},
             downloadModel = { _, _, _ -> },
-            loadModel = { file, _ -> file.name },
-            quickCheck = { model, _, _, _ ->
+            loadModel = { file, _, _ -> file.name },
+            quickCheck = { model, _, _, _, _ ->
                 quickChecks += model.id
                 model.id == models.first().id
             },
-            runWorkflow = { testCase, ready, _ ->
+            runWorkflow = { testCase, ready, _, _ ->
                 fullRuns += "${ready}:${testCase.id}"
                 AutomatedWorkflowResult(actualRuns = 1, succeeded = true)
             }
@@ -106,11 +105,11 @@ class AutomatedModelSuiteTest {
             onProgress = { finalProgress = it },
             onOutput = {},
             downloadModel = { _, _, _ -> },
-            loadModel = { file, _ ->
+            loadModel = { file, _, _ ->
                 loadedFiles += file.name
                 file.name
             },
-            quickCheck = { _, _, _, _ -> true },
+            quickCheck = { _, _, _, _, _ -> true },
             runWorkflow = { testCase, ready, _ ->
                 fullRuns += "${ready}:${testCase.id}"
                 AutomatedWorkflowResult(actualRuns = 1, succeeded = true)
@@ -149,6 +148,78 @@ class AutomatedModelSuiteTest {
                 requested = false, quickPassed = 4, quickFailed = 0, modelCount = 4, aborted = false
             )
         )
+    }
+
+    @Test
+    fun singleModeRunsOnlyThreeAutoWorkflowsForTheRequestedModel() = kotlinx.coroutines.test.runTest {
+        val models = HuggingFaceModelCatalog.models
+        val selected = models[2]
+        val coordinator = AutomatedModelSuiteCoordinator()
+        val downloaded = mutableListOf<String>()
+        val loaded = mutableListOf<String>()
+        val workflowIds = mutableListOf<String>()
+        var finalProgress = AutomatedModelSuiteProgress()
+
+        coordinator.run(
+            request = coordinator.runSingle(selected.id),
+            models = models,
+            modelDirectory = java.io.File("unused-model-directory"),
+            config = InferenceConfig.fromPreset(ProfilePreset.BALANCED),
+            fullRoutine = AutomatedModelSuitePlan.fullRoutine(),
+            isAborted = { false },
+            onProgress = { finalProgress = it },
+            onOutput = {},
+            downloadModel = { model, _, _ -> downloaded += model.id },
+            loadModel = { file, _, timeout ->
+                assertEquals(TimeoutConfig.MOBILE, timeout)
+                loaded += file.name
+                file.name
+            },
+            quickCheck = { _, _, _, _, _ -> throw AssertionError("SINGLE darf keinen Vulkan-Preflight ausführen.") },
+            runWorkflow = { testCase, _, config, timeout ->
+                assertEquals(BackendPreference.AUTO, config.backendPreference)
+                assertEquals(TimeoutConfig.MOBILE, timeout)
+                workflowIds += testCase.id
+                AutomatedWorkflowResult(actualRuns = 1, succeeded = true)
+            }
+        )
+
+        assertEquals(listOf(selected.id), downloaded)
+        assertEquals(listOf(selected.filename), loaded)
+        assertEquals(listOf("chat-basic", "dms-smoke", "json-strict"), workflowIds)
+        assertEquals("SINGLE_PASSED", finalProgress.phase)
+        assertEquals(3, finalProgress.fullTestsCompleted)
+    }
+
+    @Test
+    fun quickModeUsesExactlyThreeWorkflowsAndNoVulkanQuickCheck() = kotlinx.coroutines.test.runTest {
+        val models = HuggingFaceModelCatalog.models.take(2)
+        val coordinator = AutomatedModelSuiteCoordinator()
+        val workflowIds = mutableListOf<String>()
+        var finalProgress = AutomatedModelSuiteProgress()
+
+        coordinator.run(
+            request = coordinator.runQuick(),
+            models = models,
+            modelDirectory = java.io.File("unused-model-directory"),
+            config = InferenceConfig.fromPreset(ProfilePreset.BALANCED),
+            fullRoutine = AutomatedModelSuitePlan.fullRoutine(),
+            isAborted = { false },
+            onProgress = { finalProgress = it },
+            onOutput = {},
+            downloadModel = { _, _, _ -> },
+            loadModel = { file, _, _ -> file.name },
+            quickCheck = { _, _, _, _, _ -> throw AssertionError("QUICK darf keinen Vulkan-Preflight ausführen.") },
+            runWorkflow = { testCase, _, config, _ ->
+                assertEquals(BackendPreference.AUTO, config.backendPreference)
+                workflowIds += testCase.id
+                AutomatedWorkflowResult(actualRuns = 1, succeeded = true)
+            }
+        )
+
+        assertEquals(listOf("chat-basic", "dms-smoke", "json-strict", "chat-basic", "dms-smoke", "json-strict"), workflowIds)
+        assertEquals("QUICK_PASSED", finalProgress.phase)
+        assertEquals(6, finalProgress.fullTestsCompleted)
     }
 
 }
