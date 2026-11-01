@@ -14,6 +14,42 @@ object PromptResultValidator {
         val output = rawOutput.trim()
         if (output.isEmpty()) return PromptValidationResult(false, "Das Modell hat keinen Antworttext erzeugt.")
         return when (testCase.id) {
+            "chat-basic" -> {
+                val words = Regex("[\\p{L}\\p{N}]+(?:[-'][\\p{L}\\p{N}]+)*").findAll(output).count()
+                val sentences = Regex("[.!?](?:\\s|$)").findAll(output).count()
+                val keywords = testCase.expectedKeywords.all { output.contains(it, ignoreCase = true) }
+                val passed = keywords && words >= testCase.minimumOutputWords && sentences == 1
+                PromptValidationResult(
+                    passed,
+                    "Erwartet: mindestens \${testCase.minimumOutputWords} Wörter, genau ein Satz und das Thema Dokument; erkannt: $words Wörter, $sentences Sätze."
+                )
+            }
+            "dms-smoke" -> {
+                val sentences = Regex("[.!?](?:\\s|$)").findAll(output).count()
+                val keywords = testCase.expectedKeywords.all { output.contains(it, ignoreCase = true) }
+                val words = Regex("[\\p{L}\\p{N}]+(?:[-'][\\p{L}\\p{N}]+)*").findAll(output).count()
+                val passed = keywords && words >= testCase.minimumOutputWords && sentences == 2
+                PromptValidationResult(
+                    passed,
+                    "Erwartet: mindestens \${testCase.minimumOutputWords} Wörter, genau zwei Sätze und Dokument/Suche; erkannt: $words Wörter, $sentences Sätze."
+                )
+            }
+            "json-strict" -> {
+                val json = parseJson(output)
+                if (json == null) {
+                    PromptValidationResult(false, "Erwartet wird valides JSON ohne Markdown oder zusätzlichen Fließtext.")
+                } else {
+                    val amount = parseAmount(json.opt("totalAmount"))
+                    val passed = json.length() == 3 &&
+                        json.optString("sender", "").contains("Müller", ignoreCase = true) &&
+                        amount != null && kotlin.math.abs(amount - 149.50) < 0.005 &&
+                        json.has("iban") && json.opt("iban") === JSONObject.NULL
+                    PromptValidationResult(
+                        passed,
+                        "Erwartet: exakt sender/totalAmount/iban, Absender Müller, Betrag 149.50 und iban=null."
+                    )
+                }
+            }
             "TEST_PERFORMANCE" -> {
                 val words = Regex("[\\p{L}\\p{N}]+(?:[-'][\\p{L}\\p{N}]+)*").findAll(output).count()
                 val sentences = Regex("[.!?](?:\\s|$)").findAll(output).count()
