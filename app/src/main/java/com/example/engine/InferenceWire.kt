@@ -133,3 +133,26 @@ internal object InferenceWire {
     fun Bundle.success(): Boolean = getBoolean(SUCCESS, false)
     fun Bundle.errorMessage(): String? = getString(ERROR)
 }
+
+/*
+ * Package-level extension adapters. The implementation lives in InferenceWire
+ * to keep its key names encapsulated; these adapters make the wire conversions
+ * available to the engine facade and service as normal same-package extensions.
+ */
+internal fun InferenceConfig.toWireBundle(): Bundle =
+    with(InferenceWire) { this@toWireBundle.toWireBundle() }
+
+internal fun Bundle.toInferenceConfig(): InferenceConfig =
+    with(InferenceWire) { this@toInferenceConfig.toInferenceConfig() }
+
+internal fun NativeMetrics.toWireBundle(): Bundle =
+    with(InferenceWire) { this@toWireBundle.toWireBundle() }
+
+internal fun Bundle.toNativeMetrics(): NativeMetrics =
+    with(InferenceWire) { this@toNativeMetrics.toNativeMetrics() }
+
+internal fun Bundle.success(): Boolean =
+    with(InferenceWire) { this@success.success() }
+
+internal fun Bundle.errorMessage(): String? =
+    with(InferenceWire) { this@errorMessage.errorMessage() }
