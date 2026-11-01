@@ -228,10 +228,19 @@ object HuggingFaceDownloadBackgroundManager {
             synchronized(lock) {
                 val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 val scheduled = prefs.getStringSet(KEY_SCHEDULED_IDS, emptySet()).orEmpty().toMutableSet()
-                if (model.id in scheduled) return@synchronized
+                val systemHasJob = scheduler.allPendingJobs.any { it.id == jobId }
+                // A user can stop a UIDT job from Android's Task Manager. Android then kills
+                // the app process and does not call onStopJob(); reconcile stale persisted IDs.
+                if (model.id in scheduled && systemHasJob) return@synchronized
 
+                scheduled.remove(model.id)
                 scheduled += model.id
-                prefs.edit().putStringSet(KEY_SCHEDULED_IDS, scheduled).commit()
+                val cancelled = prefs.getStringSet(KEY_CANCELLED_IDS, emptySet()).orEmpty().toMutableSet()
+                cancelled.remove(model.id)
+                prefs.edit()
+                    .putStringSet(KEY_SCHEDULED_IDS, scheduled)
+                    .putStringSet(KEY_CANCELLED_IDS, cancelled)
+                    .commit()
 
                 val extras = PersistableBundle().apply { putString(EXTRA_MODEL_ID, model.id) }
                 val jobInfo = JobInfo.Builder(
@@ -277,7 +286,6 @@ class HuggingFaceModelDownloadJobService : JobService() {
         val modelId = params.extras.getString(HuggingFaceDownloadBackgroundManager.EXTRA_MODEL_ID)
         val model = modelId?.let(HuggingFaceModelCatalog::find)
         if (model == null) {
-            jobFinished(params, false)
             return false
         }
 
@@ -321,6 +329,12 @@ class HuggingFaceModelDownloadJobService : JobService() {
                     applicationContext,
                     model,
                     error.message ?: error.javaClass.simpleName
+                )
+                setNotification(
+                    params,
+                    notificationId,
+                    DownloadNotification.build(this@HuggingFaceModelDownloadJobService, model, 0L, model.estimatedSizeBytes, "Download fehlgeschlagen"),
+                    JOB_END_NOTIFICATION_POLICY_REMOVE
                 )
                 jobFinished(params, false)
             } finally {
