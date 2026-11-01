@@ -1487,7 +1487,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     val complete = File(modelDirectory, model.filename)
                     val partial = File(modelDirectory, "${model.filename}.part")
                     when {
-                        complete.isFile && complete.length() > 0L -> 0L
+                        findLocalHuggingFaceModel(model) != null -> 0L
                         partial.isFile -> (model.estimatedSizeBytes - partial.length()).coerceAtLeast(0L)
                         else -> model.estimatedSizeBytes
                     }
@@ -1530,7 +1530,8 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                     },
                     onOutput = { output -> _labTestOutput.value = output },
                     downloadModel = { model, index, count ->
-                        val file = huggingFaceDownloader.download(model) { downloaded, total ->
+                        val existing = findLocalHuggingFaceModel(model)
+                        val file = existing ?: huggingFaceDownloader.download(model) { downloaded, total ->
                             if (automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()) {
                                 throw CancellationException("Automatische Testreihe wurde während des Downloads abgebrochen.")
                             }
@@ -1548,10 +1549,18 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                             downloadedBytes = file.length(),
                             totalBytes = file.length(),
                             isDownloading = false,
-                            message = "Download und SHA-256-Prüfung erfolgreich."
+                            message = if (existing != null) {
+                                "Vorhandene lokale Datei wiederverwendet; kein erneuter Download."
+                            } else {
+                                "Download und SHA-256-Prüfung erfolgreich."
+                            }
                         )
                     },
-                    loadModel = { file, config -> loadModelForAutomatedSuite(file, config) },
+                    loadModel = { file, config ->
+                        val model = models.firstOrNull { it.filename == file.name }
+                        val existing = model?.let { findLocalHuggingFaceModel(it) }
+                        loadModelForAutomatedSuite(existing ?: file, config)
+                    },
                     quickCheck = { model, ready, index, count ->
                         runQuickModelCheck(model, ready, suiteConfig, index, count)
                     },
