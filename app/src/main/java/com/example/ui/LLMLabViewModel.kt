@@ -310,10 +310,11 @@ class LLMLabViewModel @JvmOverloads constructor(
         config: InferenceConfig,
         callback: InferenceCallback,
         timeoutKind: InferenceTimeoutKind,
-        requestedTimeoutMs: Long
+        requestedTimeoutMs: Long,
+        timeoutProfile: TimeoutConfig = timeoutConfig
     ): NativeMetrics {
         val operation = activeInferenceJob
-        val timeoutSession = timeoutController.startInferenceWatchdog(
+        val timeoutSession = TimeoutController(timeoutProfile).startInferenceWatchdog(
             scope = viewModelScope,
             kind = timeoutKind,
             requestedLimitMs = requestedTimeoutMs,
@@ -910,7 +911,8 @@ class LLMLabViewModel @JvmOverloads constructor(
 
     private suspend fun reloadCachedModelForTest(
         baseReady: ModelLifecycleState.Ready,
-        config: InferenceConfig
+        config: InferenceConfig,
+        timeoutProfile: TimeoutConfig = timeoutConfig
     ): PreparedTestProfile? {
         val cacheModel = activeModelFile
             ?: File(getApplication<Application>().filesDir, "active_model.gguf")
@@ -922,7 +924,7 @@ class LLMLabViewModel @JvmOverloads constructor(
         }
 
         val timedOut = AtomicBoolean(false)
-        val watchdog = timeoutController.startModelInitializationWatchdog(
+        val watchdog = TimeoutController(timeoutProfile).startModelInitializationWatchdog(
             scope = viewModelScope,
             requestedLimitMs = java.util.concurrent.TimeUnit.SECONDS.toMillis(
                 config.timeoutInitSec.coerceAtLeast(1).toLong()
@@ -1089,10 +1091,14 @@ class LLMLabViewModel @JvmOverloads constructor(
     private suspend fun runLabTestInternal(
         testCase: PromptTestCase,
         originalReady: ModelLifecycleState.Ready,
-        originalConfig: InferenceConfig
+        originalConfig: InferenceConfig,
+        timeoutProfile: TimeoutConfig = timeoutConfig,
+        backendOverride: BackendPreference? = null
     ): Boolean {
 
-            val variants = AutomatedModelSuitePlan.variantsFor(testCase)
+            val variants = AutomatedModelSuitePlan.variantsFor(testCase).map { variant ->
+                backendOverride?.let { variant.copy(backendPreference = it) } ?: variant
+            }
             _labActiveTest.value = testCase
             _labTestOutput.value = "Automatischer Vergleich gestartet: ${variants.size} native Profile × 1 Test."
             _labMetrics.value = null
@@ -1117,7 +1123,8 @@ class LLMLabViewModel @JvmOverloads constructor(
                     ?.let { PreparedTestProfile(it, "MODEL_REUSED") }
                 val preparedProfile = alreadyPrepared ?: reloadCachedModelForTest(
                     currentReady ?: originalReady,
-                    configForTest
+                    configForTest,
+                    timeoutProfile
                 )
                 val profileSetupDurationMs = SystemClock.elapsedRealtime() - profileSetupStartedAt
                 val readyForVariant = preparedProfile?.ready
@@ -1219,7 +1226,8 @@ class LLMLabViewModel @JvmOverloads constructor(
                     timeoutKind = testCase.timeoutKind,
                     requestedTimeoutMs = java.util.concurrent.TimeUnit.SECONDS.toMillis(
                         testCase.timeoutSec.coerceAtLeast(1).toLong()
-                    )
+                    ),
+                    timeoutProfile = timeoutProfile
                 )
                 val wallDurationMs = (SystemClock.elapsedRealtime() - wallTimeBeforeMs).coerceAtLeast(1L)
                 val cpuDurationMs = (android.os.Process.getElapsedCpuTime() - cpuTimeBeforeMs).coerceAtLeast(0L)
@@ -1277,7 +1285,7 @@ class LLMLabViewModel @JvmOverloads constructor(
                 val restoredProfile = currentReady
                     ?.takeIf { it.loadedConfig.hasSameNativeContext(originalConfig) }
                     ?.let { PreparedTestProfile(it, "MODEL_REUSED") }
-                    ?: reloadCachedModelForTest(currentReady ?: originalReady, originalConfig)
+                    ?: reloadCachedModelForTest(currentReady ?: originalReady, originalConfig, timeoutProfile)
                 if (restoredProfile != null) {
                     _modelState.value = restoredProfile.ready
                     _labTestOutput.value += "\n\nUrsprüngliches Modellprofil wurde wiederhergestellt."
@@ -1299,7 +1307,8 @@ class LLMLabViewModel @JvmOverloads constructor(
 
     private suspend fun loadModelForAutomatedSuite(
         file: File,
-        config: InferenceConfig
+        config: InferenceConfig,
+        timeoutProfile: TimeoutConfig = timeoutConfig
     ): ModelLifecycleState.Ready? {
         if (!file.isFile || file.length() <= 0L) {
             _automatedSuite.value = _automatedSuite.value.copy(error = "Modell-Datei fehlt oder ist leer: ${file.name}")
@@ -1321,7 +1330,7 @@ class LLMLabViewModel @JvmOverloads constructor(
         )
         val startedAt = SystemClock.elapsedRealtime()
         val timedOut = AtomicBoolean(false)
-        val watchdog = timeoutController.startModelInitializationWatchdog(
+        val watchdog = TimeoutController(timeoutProfile).startModelInitializationWatchdog(
             scope = viewModelScope,
             requestedLimitMs = java.util.concurrent.TimeUnit.SECONDS.toMillis(
                 config.timeoutInitSec.coerceAtLeast(1).toLong()
@@ -1390,7 +1399,8 @@ class LLMLabViewModel @JvmOverloads constructor(
         ready: ModelLifecycleState.Ready,
         config: InferenceConfig,
         modelIndex: Int,
-        modelCount: Int
+        modelCount: Int,
+        timeoutProfile: TimeoutConfig = timeoutConfig
     ): Boolean {
         val prompt = AutomatedModelSuitePlan.quickPrompt
         val testCase = PromptTestCase(
@@ -1431,7 +1441,8 @@ class LLMLabViewModel @JvmOverloads constructor(
             quickConfig,
             callback,
             InferenceTimeoutKind.PERFORMANCE,
-            java.util.concurrent.TimeUnit.SECONDS.toMillis(testCase.timeoutSec.coerceAtLeast(1).toLong())
+            java.util.concurrent.TimeUnit.SECONDS.toMillis(testCase.timeoutSec.coerceAtLeast(1).toLong()),
+            timeoutProfile = timeoutProfile
         )
         val passed = AutomatedModelSuitePlan.quickCheckPassed(
             activeBackendName = backendName,
@@ -1478,11 +1489,13 @@ class LLMLabViewModel @JvmOverloads constructor(
         return passed
     }
 
-    fun runQwenQuickCheck() = runQwenModelSuite(runFullAfterQuickCheck = false)
+    fun runQwenQuickCheck() = runQwenModelSuite(automatedSuiteCoordinator.runQuick())
 
-    fun runQwenQuickThenFull() = runQwenModelSuite(runFullAfterQuickCheck = true)
+    fun runQwenQuickThenFull() = runQwenModelSuite(automatedSuiteCoordinator.runFull())
 
-    private fun runQwenModelSuite(runFullAfterQuickCheck: Boolean) {
+    fun runSingleModel(modelId: String) = runQwenModelSuite(automatedSuiteCoordinator.runSingle(modelId))
+
+    private fun runQwenModelSuite(request: com.example.engine.SuiteRequest) {
         if (_automatedSuite.value.isRunning || huggingFaceDownloadJob?.isActive == true) return
 
         val previousReady = _modelState.value as? ModelLifecycleState.Ready
@@ -1496,7 +1509,11 @@ class LLMLabViewModel @JvmOverloads constructor(
             nUbatch = 64,
             nThreads = 4,
             nThreadsBatch = 8,
-            backendPreference = BackendPreference.ACCELERATOR_REQUIRED,
+            backendPreference = if (request.mode == com.example.engine.SuiteMode.FULL) {
+                BackendPreference.ACCELERATOR_REQUIRED
+            } else {
+                BackendPreference.AUTO
+            },
             temperature = 0f,
             topK = 1,
             topP = 1f,
@@ -1520,7 +1537,12 @@ class LLMLabViewModel @JvmOverloads constructor(
                     throw IOException("Der interne Modellordner konnte nicht angelegt werden.")
                 }
 
-                val remainingModelBytes = models.sumOf { model ->
+                val requiredModels = if (request.mode == com.example.engine.SuiteMode.SINGLE) {
+                    models.filter { it.id == request.singleModel }
+                } else {
+                    models
+                }
+                val remainingModelBytes = requiredModels.sumOf { model ->
                     val complete = File(modelDirectory, model.filename)
                     val partial = File(modelDirectory, "${model.filename}.part")
                     when {
@@ -1533,18 +1555,18 @@ class LLMLabViewModel @JvmOverloads constructor(
                 val availableBytes = android.os.StatFs(modelDirectory.absolutePath).availableBytes
                 if (availableBytes < remainingModelBytes + storageReserveBytes) {
                     throw IOException(
-                        "Für alle vier Qwen-Modelle fehlen ungefähr " +
+                        "Für die ausgewählten Qwen-Modelle fehlen ungefähr " +
                             "${(remainingModelBytes + storageReserveBytes - availableBytes) / (1024L * 1024L)} MB Speicher. " +
                             "Benötigt werden rund 3,1 GB für die Modelle plus Reserve."
                     )
                 }
 
-                automatedSuiteCoordinator.execute(
+                automatedSuiteCoordinator.run(
+                    request = request,
                     models = models,
                     modelDirectory = modelDirectory,
                     config = suiteConfig,
                     fullRoutine = AutomatedModelSuitePlan.fullRoutine(),
-                    runFullAfterQuickCheck = runFullAfterQuickCheck,
                     isAborted = {
                         automatedSuiteAbortRequested.get() ||
                             nativeBridge.isAbortRequested() ||
@@ -1593,17 +1615,24 @@ class LLMLabViewModel @JvmOverloads constructor(
                             }
                         )
                     },
-                    loadModel = { file, config ->
+                    loadModel = { file, config, timeout ->
                         val model = models.firstOrNull { it.filename == file.name }
                         val existing = model?.let { findLocalHuggingFaceModel(it) }
-                        loadModelForAutomatedSuite(existing ?: file, config)
+                        loadModelForAutomatedSuite(existing ?: file, config, timeout)
                     },
-                    quickCheck = { model, ready, index, count ->
-                        runQuickModelCheck(model, ready, suiteConfig, index, count)
+                    quickCheck = { model, ready, index, count, timeout ->
+                        runQuickModelCheck(model, ready, suiteConfig, index, count, timeout)
                     },
-                    runWorkflow = { testCase, ready, config ->
+                    runWorkflow = { testCase, ready, config, timeout ->
                         val runsBefore = dao.getCount()
-                        val succeeded = runLabTestInternal(testCase, ready, config)
+                        val backendOverride = if (config.backendPreference == BackendPreference.AUTO) {
+                            BackendPreference.AUTO
+                        } else {
+                            null
+                        }
+                        val succeeded = runLabTestInternal(
+                            testCase, ready, config, timeoutProfile = timeout, backendOverride = backendOverride
+                        )
                         val actualRuns = (dao.getCount() - runsBefore).coerceAtLeast(0)
                         AutomatedWorkflowResult(actualRuns = actualRuns, succeeded = succeeded)
                     }
