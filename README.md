@@ -6,12 +6,12 @@ Eigenständige Android-Test-App zur Untersuchung echter lokaler GGUF-Inferenz au
 
 - Android, Kotlin, Jetpack Compose, Room und C++/JNI.
 - Native Engine: `llama.cpp`, fest gepinnt als Git-Submodul unter `third_party/llama.cpp` auf Commit `78feec062d50ec9e8940244cac918ac4480b60cb` (API-Version `0.8.0-dev`).
-- CPU ist immer als sicherer Fallback einkompiliert. Vulkan wird zusätzlich als generisches GPU-Backend gebaut; ob es auf einem Gerät initialisierbar ist, wird zur Laufzeit über die llama.cpp-Registry geprüft. CUDA/Metal sind auf Android nicht aktiviert. Hersteller-NPUs (z. B. Qualcomm QNN/Hexagon oder MediaTek NeuroPilot) benötigen jeweils eigene SDK-/Backend-Adapter und sind in diesem Build noch nicht enthalten.
+- **CPU (stabil):** als sicherer Fallback einkompiliert und der Referenzpfad für verlässliche Inferenz. **Vulkan (experimentell):** generisches GPU-Backend; die Verfügbarkeit wird zur Laufzeit über die llama.cpp-Registry geprüft. Der native Code läuft isoliert im Android-Prozess `:inference`. CUDA/Metal sind auf Android nicht aktiviert. **NPU:** nicht enthalten; siehe [docs/npu-backend.md](docs/npu-backend.md).
 - GGUF-Modell wird über den Android-Dateiauswahldialog ausgewählt und vor dem nativen Laden in den internen App-Speicher kopiert. Das Modell ist nicht in der APK enthalten.
 - Eigenständige Package-ID: `de.mrlongnight.llmlab`; `minSdk=29` (Android 10), `targetSdk=36`, ABIs `arm64-v8a` und `x86_64`.
 - Keine Firebase-, Gemini-, Cloud-Inferenz-, Login- oder externen KI-API-Abhängigkeiten. Internetzugriff wird ausschließlich für vom Nutzer gestartete HTTPS-Downloads der Qwen-GGUF-Dateien von Hugging Face verwendet; die Inferenz läuft anschließend lokal. Android-App-Backup ist deaktiviert.
 
-Die App darf „Modell bereit“ erst anzeigen, wenn `llama_load_model_from_file` und `llama_new_context_with_model` erfolgreich zurückgekehrt sind. Bei fehlender nativer Bibliothek gibt es keinen JVM-Ersatzpfad. Die Backend-Registry meldet pro Backend Initialisierbarkeit und Abbruchfähigkeit. In der gepinnten llama.cpp-Version b11998 wird der sichere AUTO-Pfad auf CPU gehalten; Vulkan-Offload wird nur mit `ACCELERATOR_REQUIRED` erzwungen und bleibt wegen der fehlenden verlässlichen Abbruchgarantie ein experimenteller Testmodus.
+Die App darf „Modell bereit“ erst anzeigen, wenn Modell und llama.cpp-Kontext erfolgreich initialisiert wurden. Bei fehlender nativer Bibliothek gibt es keinen JVM-Ersatzpfad. Die Backend-Registry meldet verfügbare Backends und deren Eigenschaften. Der Standardpfad `AUTO` bleibt auf CPU; Vulkan wird nur mit `ACCELERATOR_REQUIRED` ausdrücklich angefordert.
 
 ## Build und Tests
 
@@ -24,14 +24,17 @@ git submodule update --init --recursive
 chmod +x gradlew
 ./gradlew assembleDebug --no-daemon
 ./gradlew testDebugUnitTest --no-daemon
+./gradlew assembleDebugAndroidTest --no-daemon
+# Auf einem verbundenen Android-Zielgerät:
+./gradlew connectedDebugAndroidTest
 ```
 
-Die GitHub-Actions-Pipeline führt dieselben beiden Gradle-Aufgaben aus und veröffentlicht anschließend das Artefakt `LLM-Lab-Standalone-Debug-APK`. Die Tests umfassen JVM-/Robolectric-Tests; sie ersetzen keine Tests auf dem tatsächlichen Android-Zielgerät.
+Die GitHub-Actions-Pipeline baut die Debug-APK, führt JVM-/Robolectric-Tests aus und kompiliert zusätzlich das Android-Test-APK. Sie veröffentlicht das Artefakt `LLM-Lab-Standalone-Debug-APK`. CI grün ≠ geräteverifiziert: Ohne angeschlossenes Zielgerät werden die Instrumentationstests nicht ausgeführt.
 
 ## Installation und erster Modelltest
 
 1. Die APK `LLM-Lab-Standalone-debug.apk` aus dem Actions-Artefakt herunterladen und auf dem Android-Zielgerät installieren.
-2. Im Bereich **Modell** eines der vier Qwen-GGUF-Modelle direkt herunterladen. Alternativ kannst du unter **Eigenes GGUF-Modell importieren** eine eigene Datei auswählen. Hugging-Face-Downloads werden fortgesetzt und vor der Verwendung per GGUF-Header und SHA-256 geprüft.
+2. Im Bereich **Modell** kann ein Qwen-GGUF-Modell per **Download** über den Hintergrund-Download von Hugging Face bezogen werden. Alternativ lässt sich unter **Eigenes GGUF-Modell importieren** eine lokale Datei auswählen. Der Download-Code setzt `.part`-Dateien fort und prüft GGUF-Header sowie SHA-256 vor der Freigabe. **Wichtig:** Für die aktuelle Version wurde ein Fehler gemeldet, bei dem Hugging-Face-Dateien nicht geladen werden können. Dieser Downloadpfad ist deshalb ausdrücklich noch nicht als auf Zielhardware funktionsfähig abgenommen; die Dokumentation behauptet keine Fehlerbehebung.
 3. Nach erfolgreicher Prüfung wird das ausgewählte Modell zur Initialisierung angeboten. **Modell jetzt initialisieren** startet das native Laden; erst danach erscheint der Status **Modell einsatzbereit**.
 4. Im **Prompt-Testlabor** die automatische Qwen-Matrix starten: **Quick-Pretest** prüft alle vier Modelle einzeln. **Quick → Full** startet die vollständigen 80 Einzelprofile nur dann, wenn alle vier Quick-Checks bestanden wurden.
 5. Im Prompt-Testlabor können außerdem die sieben Einzelworkflows für Durchsatz, DMS, JSON-Extraktion, Vulkan-Hardware-Tuning, Sampling und zwei reproduzierbare Prompt-Prefill-Längen separat ausgeführt werden.
@@ -53,29 +56,35 @@ Sampling-Parameter bleiben innerhalb eines Dreiervergleichs identisch, damit Unt
 
 Der separate Stabilitätscheck führt drei echte Kurz-Inferenzen aus. Timeout, nativer Fehler oder eine falsche Antwort beenden den Lauf automatisch.
 
-## Abbruch- und Timeout-Verhalten
+## Limitations
 
-Die Kotlin-Schicht sendet bei manuellem Abbruch oder Timeout ein natives Abbruchsignal. Der sichere AUTO-/CPU-Pfad nutzt den llama.cpp-Abort-Callback; der Vulkan-Offload-Modus hat in der gepinnten Version keine verlässliche Abbruchgarantie. Timeouts: Modellinitialisierung 120 s, normale Inferenz 120 s, Performance- und DMS-Workflow je Profil 180 s, Extraktion je Profil 240 s, Stabilitätscheck je Lauf 120 s.
+- Native Aufrufe laufen im separaten Android-Prozess `:inference` und sind über das Beenden dieses Prozesses abbrechbar. Ein kooperativer Abbruch innerhalb eines laufenden nativen Vulkan-Aufrufs ist damit nicht zugesichert.
+- **Vulkan bleibt experimentell.** Die Prozessisolation ermöglicht den harten Timeout-/Abort-Pfad durch Prozessbeendigung; sie ist kein Beleg dafür, dass ein Vulkan-Kernel selbst kooperativ abbricht oder ein Vulkan-Fehler behoben wäre.
+- Der Speicherschutz prüft vor Modellinitialisierungen den verfügbaren Speicher gegen 1,5× der im Modellkatalog geschätzten Modellgröße. Androids kritische Memory-Pressure-Meldungen brechen die laufende Suite ab. Das ist eine Schutzmaßnahme, aber keine Garantie gegen jede mögliche systemweite Speichersituation.
+- Hersteller-NPUs sind nicht enthalten; Details und Voraussetzungen stehen unter [docs/npu-backend.md](docs/npu-backend.md).
+- Der aktuelle Hugging-Face-Downloadpfad hat einen gemeldeten Fehler auf der installierten Version und ist bis zur Diagnose und einem echten erfolgreichen Gerätetest nicht als abgenommen zu betrachten.
 
-Wichtige technische Grenze: Ein nativer C/C++-Aufruf kann von Kotlin nicht sicher zwangsweise beendet werden. Reagiert die native Operation 10 Sekunden nach dem Abbruchsignal weiterhin nicht, markiert die App die Engine als nicht mehr antwortfähig, blockiert weitere Engine-Operationen und fordert einen Neustart der App. Das ist ein diagnostizierter Fehlerzustand, kein erfolgreicher Abbruch. Ob die reale Zielgeräte-/llama.cpp-Kombination innerhalb des Grenzwerts reagiert, muss auf dem Smartphone geprüft werden.
+## Device Acceptance (Gate für myDocAnizer-Integration)
 
-## Abnahmestatus
+Die Integration in `myDocAnizer-Mobile` ist erst freigegeben, wenn alle fünf Kriterien auf dem tatsächlichen Zielgerät erfolgreich geprüft und hier mit echtem Datum sowie Gerätebezeichnung eingetragen wurden.
 
-Ein grüner GitHub-Actions-Lauf beweist nur, dass die Android-App und die native Bibliothek kompiliert werden und die vorhandenen JVM-/Robolectric-Tests bestehen. Er beweist ausdrücklich **nicht**, dass das Qwen-GGUF-Modell auf dem Zielgerät lädt oder dort echte Tokens generiert.
+| Abnahmekriterium | Ergebnis | Datum | Gerät |
+|---|:---:|---|---|
+| Modellinitialisierung mit einem lokalen GGUF-Modell erfolgreich |  |  |  |
+| SuiteMode.FULL: alle sieben Workflows erfolgreich durchgelaufen |  |  |  |
+| Abort-/Timeout-Pfad: Inference-Prozess beendet, erneute Verbindung und Modell-Reload erfolgreich |  |  |  |
+| Zehn kurze Inferenzläufe hintereinander ohne Exception oder Prozessabsturz |  |  |  |
+| Speicherdruck: Modell-Load wird bei verfügbarem RAM unter 1,5× Modellbedarf sauber abgewiesen; kritischer Memory-Pressure-Abbruch beendet die Suite |  |  |  |
 
-Vor Übergabe an `myDocAnizer-Mobile` sind auf dem tatsächlichen Smartphone mindestens folgende Punkte zu protokollieren:
+Ein leeres Ergebnisfeld bedeutet **nicht getestet**. Häkchen, Datum und Gerät dürfen erst nach einem realen Lauf auf dem Zielgerät ergänzt werden. Die Tabelle wird nicht durch CI-Ergebnisse ersetzt.
 
-- [ ] Modellinitialisierung mit dem angegebenen Qwen-GGUF erfolgreich, Status erst danach `Modell bereit`.
-- [ ] Alle sieben automatischen Workflows laufen auf dem Smartphone; fünf Vulkan-Hardwareprofile, je drei Prefill-Profile und fünf Sampling-Profile werden mit den tatsächlich geladenen Parametern und Messwerten dokumentiert.
-- [ ] Die eine CPU-Referenz und Vulkan-Offload sind anhand tatsächlicher Ladeprotokolle und nicht nur der Backend-Auswahl verglichen; die Full-Routine enthält keine redundanten CPU-only-Tuningläufe.
-- [ ] Deutsche DMS-Antwort und Extraktion erfüllen ihre inhaltlichen Validatoren.
-- [ ] Tokenisierung, Prompt-Eval und Generierung zeigen plausible native Messwerte.
-- [ ] Manueller Abbruch und jede Timeout-Klasse kehren innerhalb der festgelegten Grenzen zurück.
-- [ ] Nach Abbruch kann unmittelbar eine neue Inferenz gestartet werden.
-- [ ] Der 3-fache Stabilitätscheck läuft ohne Hänger; Erfolg, Fehler, Timeout, Mittelwert, p50 und p95 werden dokumentiert.
-- [ ] TXT- und JSON-Export sind auf dem Smartphone erzeugt und enthalten Modell-/Engine-Version, Parameter und Testresultate.
+## Integration Notes
 
-Bis diese Zielgerätetests durchgeführt und dokumentiert sind, ist der Prototyp **buildfähig mit integrierter llama.cpp-Engine**, aber noch nicht als auf dem Smartphone funktionsfähig abgenommen.
+- **`InferenceClient` ist die stabile API-Grenze** für Verbindung, Binder-Aufrufe und den harten Timeout-/Abort-Pfad zur isolierten `:inference`-Service-Instanz. Neue Integrationen sollen nicht direkt `LlamaNativeBridge` oder JNI aufrufen.
+- **`TimeoutConfig.MOBILE` ist der Standardwert** für `SuiteRequest` und mobile Testläufe. `SuiteMode.FULL` nutzt in der aktuellen Suite-Implementierung bewusst das Legacy-Zeitprofil für längere Reproduktionsläufe.
+- **`SuiteMode.QUICK`** ist für den Alltags-Smoke-Test gedacht: drei kurze Workflows mit Backend-Präferenz `AUTO`.
+- **`SuiteMode.FULL`** ist für reproduzierbare Vergleichsläufe gedacht und enthält die sieben definierten Workflows mit der zugehörigen Profilmatrix sowie dem vorgeschalteten Quick-Check.
+- CI prüft Build, JVM-/Robolectric-Tests und die Kompilierung der Instrumentationstests. **CI grün ≠ geräteverifiziert** und ersetzt weder Modell-Download noch Inferenz, Abort, Wiederholung oder Speicherdruck auf dem Zielgerät.
 
 ## Hugging Face: Qwen-Modellmatrix
 
@@ -92,8 +101,8 @@ Downloads laufen auf ausdrücklichen Tastendruck in den dauerhaften App-internen
 
 ### Automatische Testreihe
 
-- Quick-Preflight lädt jedes der vier Modelle nacheinander, verlangt das Vulkan-Backend, mindestens eine nachgewiesene GPU-Layer-Zuordnung und eine erfolgreich abgeschlossene Kurzantwort.
-- Die Full-Routine startet nur, wenn alle vier Quick-Checks bestanden wurden.
+- `SuiteMode.QUICK` führt für die ausgewählten Modelle genau drei kurze Workflows (`chat-basic`, `dms-smoke`, `json-strict`) mit Backend-Präferenz `AUTO` aus. Dieser Modus ist der schnelle Alltags-Smoke-Test und kein Vulkan-Preflight.
+- `SuiteMode.FULL` führt die vollständige siebenstufige Workflow-Matrix aus. Vorher werden die Modelle geladen und der bestehende Quick-Check ausgeführt; die Full-Matrix wird nur nach bestandenem Preflight freigegeben.
 - Die Full-Routine umfasst sieben Workflows und 20 Einzelprofile je Modell (80 Gesamtprofile): Durchsatz (eine CPU-Referenz plus Vulkan), deutsche Instruktion, JSON-Extraktion, fünf Vulkan-Hardwareprofile, zwei Prefill-Längen mit jeweils drei Vulkan-ubatch-Profilen und fünf Vulkan-Samplingprofile.
 - CPU-only wird damit nur einmal pro Modell als Referenz gemessen. Die restlichen 76 Full-Profile sowie alle Quick-Checks laufen mit zwingend angefordertem Vulkan-Backend.
 - Nach der Testreihe wird das zuvor ausgewählte Modell und dessen Konfiguration wiederhergestellt.
