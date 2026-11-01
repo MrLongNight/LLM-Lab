@@ -21,7 +21,7 @@ object PromptResultValidator {
                 val passed = keywords && words >= testCase.minimumOutputWords && sentences == 1
                 PromptValidationResult(
                     passed,
-                    "Erwartet: mindestens \${testCase.minimumOutputWords} Wörter, genau ein Satz und das Thema Dokument; erkannt: $words Wörter, $sentences Sätze."
+                    "Erwartet: mindestens ${testCase.minimumOutputWords} Wörter, genau ein Satz und das Thema Dokument; erkannt: $words Wörter, $sentences Sätze."
                 )
             }
             "dms-smoke" -> {
@@ -31,7 +31,7 @@ object PromptResultValidator {
                 val passed = keywords && words >= testCase.minimumOutputWords && sentences == 2
                 PromptValidationResult(
                     passed,
-                    "Erwartet: mindestens \${testCase.minimumOutputWords} Wörter, genau zwei Sätze und Dokument/Suche; erkannt: $words Wörter, $sentences Sätze."
+                    "Erwartet: mindestens ${testCase.minimumOutputWords} Wörter, genau zwei Sätze und Dokument/Suche; erkannt: $words Wörter, $sentences Sätze."
                 )
             }
             "json-strict" -> {
