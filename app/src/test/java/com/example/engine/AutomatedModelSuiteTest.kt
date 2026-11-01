@@ -274,4 +274,42 @@ class AutomatedModelSuiteTest {
         assertEquals(6, finalProgress.fullTestsCompleted)
     }
 
+
+    @Test
+    fun suiteStopsBeforeNativeLoadWhenFreeMemoryIsBelowOneAndAHalfModelSizes() = kotlinx.coroutines.test.runTest {
+        val model = HuggingFaceModelCatalog.models.first()
+        val requiredBytes = model.estimatedSizeBytes + model.estimatedSizeBytes / 2L
+        val coordinator = AutomatedModelSuiteCoordinator(
+            memoryInfoProvider = { requiredBytes - 1L }
+        )
+        var loadCalls = 0
+        var finalProgress = AutomatedModelSuiteProgress()
+        var output = ""
+
+        coordinator.run(
+            request = coordinator.runSingle(model.id),
+            models = listOf(model),
+            modelDirectory = java.io.File("unused-model-directory"),
+            config = InferenceConfig.fromPreset(ProfilePreset.BALANCED),
+            fullRoutine = AutomatedModelSuitePlan.fullRoutine(),
+            isAborted = { false },
+            onProgress = { finalProgress = it },
+            onOutput = { output = it },
+            downloadModel = { _, _, _ -> },
+            loadModel = { _, _, _ ->
+                loadCalls++
+                "should-not-load"
+            },
+            quickCheck = { _, _, _, _, _ -> throw AssertionError("SINGLE must not run the FULL quick check.") },
+            runWorkflow = { _, _, _, _ -> throw AssertionError("No workflow may run after a memory rejection.") }
+        )
+
+        assertEquals(0, loadCalls)
+        assertTrue(output.contains("Insufficient memory for model ${model.filename}"))
+        assertTrue(output.contains("need ${requiredBytes} bytes"))
+        assertTrue(output.contains("have ${requiredBytes - 1L} bytes"))
+        assertTrue(finalProgress.error.orEmpty().contains("Insufficient memory"))
+        assertEquals("ERROR", finalProgress.phase)
+    }
+
 }

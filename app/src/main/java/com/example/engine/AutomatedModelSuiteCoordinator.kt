@@ -1,6 +1,14 @@
 package com.example.engine
 
+import android.app.ActivityManager
+import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -38,7 +46,96 @@ data class AutomatedWorkflowResult(
  * Owns the ordered Qwen test flow. Android/native operations are supplied by the
  * ViewModel, while the download -> quick gate -> full matrix state machine lives here.
  */
-class AutomatedModelSuiteCoordinator {
+class AutomatedModelSuiteCoordinator(
+    private val context: Context? = null,
+    private val memoryInfoProvider: (() -> Long)? = null
+) {
+
+    private val modelLoadSemaphore = Semaphore(1)
+    private val currentJob = AtomicReference<Job?>(null)
+
+    /**
+     * Cancels the active suite when Android reports critical memory pressure.
+     * Cancellation is cooperative; the native engine is deliberately not modified.
+     */
+    fun cancelCurrent() {
+        currentJob.get()?.cancel(CancellationException("Critical memory pressure; model suite cancelled."))
+    }
+
+    private suspend fun <Ready : Any> runInternal(
+        request: SuiteRequest,
+        models: List<HuggingFaceModel>,
+        modelDirectory: File,
+        config: InferenceConfig,
+        fullRoutine: List<PromptTestCase>,
+        isAborted: () -> Boolean,
+        onProgress: (AutomatedModelSuiteProgress) -> Unit,
+        onOutput: (String) -> Unit,
+        downloadModel: suspend (HuggingFaceModel, Int, Int) -> Unit,
+        loadModel: suspend (File, InferenceConfig, TimeoutConfig) -> Ready?,
+        quickCheck: suspend (HuggingFaceModel, Ready, Int, Int, TimeoutConfig) -> Boolean,
+        runWorkflow: suspend (PromptTestCase, Ready, InferenceConfig, TimeoutConfig) -> AutomatedWorkflowResult
+    ) {
+        val runJob = currentCoroutineContext()[Job]
+        if (runJob != null) currentJob.set(runJob)
+
+        val memoryMonitor = context?.let { appContext ->
+            MemoryPressureMonitor(appContext) {
+                Log.w(TAG, "Critical memory pressure reported by Android; cancelling active model suite.")
+                cancelCurrent()
+            }
+        }
+        memoryMonitor?.register()
+
+        try {
+            val guardedLoadModel: suspend (File, InferenceConfig, TimeoutConfig) -> Ready? =
+                { file, loadConfig, timeout ->
+                    modelLoadSemaphore.withPermit {
+                        val model = models.firstOrNull { it.filename == file.name }
+                            ?: throw IllegalStateException("Cannot determine model size for ${file.name}")
+                        val availableBytes = readAvailableMemoryBytes()
+                        if (availableBytes != null) {
+                            val requiredBytes = model.estimatedSizeBytes + model.estimatedSizeBytes / 2L
+                            if (availableBytes < requiredBytes) {
+                                val message = "Insufficient memory for model ${model.filename} (need ${requiredBytes} bytes, have ${availableBytes} bytes)"
+                                Log.e(TAG, message)
+                                throw InsufficientModelMemoryException(message)
+                            }
+                            Log.d(TAG, "Memory check passed for ${model.filename}: need ${requiredBytes} bytes, have ${availableBytes} bytes.")
+                        }
+                        loadModel(file, loadConfig, timeout)
+                    }
+                }
+
+            runInternal(
+                request = request,
+                models = models,
+                modelDirectory = modelDirectory,
+                config = config,
+                fullRoutine = fullRoutine,
+                isAborted = isAborted,
+                onProgress = onProgress,
+                onOutput = onOutput,
+                downloadModel = downloadModel,
+                loadModel = guardedLoadModel,
+                quickCheck = quickCheck,
+                runWorkflow = runWorkflow
+            )
+        } finally {
+            memoryMonitor?.unregister()
+            if (runJob != null) currentJob.compareAndSet(runJob, null)
+        }
+    }
+
+    private fun readAvailableMemoryBytes(): Long? {
+        memoryInfoProvider?.let { return it() }
+        val appContext = context ?: return null
+        val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            ?: return null
+        val memoryInfo = ActivityManager.MemoryInfo()
+        activityManager.getMemoryInfo(memoryInfo)
+        return memoryInfo.availMem
+    }
 
     fun runQuick(): SuiteRequest = SuiteRequest(SuiteMode.QUICK)
 
@@ -456,6 +553,7 @@ class AutomatedModelSuiteCoordinator {
     }
 
     companion object {
+        private const val TAG = "AutomatedModelSuite"
         const val MAX_PARALLEL_DOWNLOADS = 2
         fun shouldRunFullRoutine(
             requested: Boolean,
@@ -467,3 +565,7 @@ class AutomatedModelSuiteCoordinator {
             quickFailed == 0 && quickPassed == modelCount
     }
 }
+
+
+/** A model load was rejected before native allocation because free RAM was insufficient. */
+class InsufficientModelMemoryException(message: String) : IllegalStateException(message)

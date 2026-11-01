@@ -149,7 +149,7 @@ class LLMLabViewModel @JvmOverloads constructor(
     private val dao = db.testRunDao()
     private val nativeBridge = NativeInferenceEngine(application)
     private val timeoutController = TimeoutController(timeoutConfig)
-    private val automatedSuiteCoordinator = AutomatedModelSuiteCoordinator()
+    private val automatedSuiteCoordinator = AutomatedModelSuiteCoordinator(application)
     private val _downloadedModelIds = MutableStateFlow<Set<String>>(emptySet())
     val downloadedModelIds: StateFlow<Set<String>> = _downloadedModelIds.asStateFlow()
     private val _huggingFaceDownloads = MutableStateFlow<Map<String, HuggingFaceDownloadUiState>>(emptyMap())
