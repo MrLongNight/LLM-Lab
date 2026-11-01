@@ -33,6 +33,8 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
     val testOutput by viewModel.labTestOutput.collectAsState()
     val labMetrics by viewModel.labMetrics.collectAsState()
     val config by viewModel.config.collectAsState()
+    val automatedSuite by viewModel.automatedSuite.collectAsState()
+    val downloadState by viewModel.huggingFaceDownload.collectAsState()
 
     val readyState = modelState as? ModelLifecycleState.Ready
     val isModelReady = readyState != null && readyState.loadedConfig.hasSameNativeContext(config)
@@ -105,6 +107,17 @@ fun PromptLabScreen(viewModel: LLMLabViewModel) {
                 )
             }
         }
+
+        AutomatedQwenSuiteCard(
+            suiteState = automatedSuite,
+            downloadInProgress = downloadState.isDownloading,
+            singleTestRunning = isRunning,
+            onQuickCheck = { viewModel.runQwenQuickCheck() },
+            onQuickThenFull = { viewModel.runQwenQuickThenFull() },
+            onAbort = { viewModel.requestAbort() }
+        )
+
+        Spacer(modifier = Modifier.height(10.dp))
 
         if (contextReloadRequired) {
             Text(
@@ -267,6 +280,90 @@ private fun PromptWorkflowCard(
                         Spacer(Modifier.width(4.dp))
                         Text("$profileCount Profile testen", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
+                }
+            }
+        }
+    }
+}
+
+
+@Composable
+private fun AutomatedQwenSuiteCard(
+    suiteState: com.example.ui.AutomatedModelSuiteUiState,
+    downloadInProgress: Boolean,
+    singleTestRunning: Boolean,
+    onQuickCheck: () -> Unit,
+    onQuickThenFull: () -> Unit,
+    onAbort: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, NeonCyan.copy(alpha = 0.45f))
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("AUTOMATISCHE QWEN-MODELLMATRIX", color = NeonCyan, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "Testet alle vier Qwen-Modelle nacheinander. Quick prüft Laden, Vulkan-GPU-Offload und echte Token-Ausgabe. Quick → Full startet die 80 Einzelprofile ausschließlich dann, wenn alle vier Quick-Checks bestanden wurden.",
+                color = TextSecondary,
+                fontSize = 11.sp
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onQuickCheck,
+                    enabled = !suiteState.isRunning && !downloadInProgress && !singleTestRunning,
+                    modifier = Modifier.weight(1f).testTag("qwen_quick_check_button")
+                ) {
+                    Text("Quick-Pretest", fontSize = 11.sp)
+                }
+                Button(
+                    onClick = onQuickThenFull,
+                    enabled = !suiteState.isRunning && !downloadInProgress && !singleTestRunning,
+                    colors = ButtonDefaults.buttonColors(containerColor = MatrixGreen, contentColor = Color.Black),
+                    modifier = Modifier.weight(1f).testTag("qwen_quick_full_button")
+                ) {
+                    Text("Quick → Full", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            if (suiteState.isRunning || suiteState.phase != "IDLE") {
+                Text(
+                    "${suiteState.phase} · Modell ${suiteState.currentModelIndex}/${suiteState.modelCount} · Quick: ${suiteState.quickPassed}/${suiteState.modelCount} · Full: ${suiteState.fullTestsCompleted}/${suiteState.fullTestsTotal}",
+                    color = if (suiteState.error == null) NeonCyan else LaserCrimson,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                if (suiteState.isRunning) {
+                    LinearProgressIndicator(
+                        progress = {
+                            when {
+                                suiteState.fullTestsTotal > 0 ->
+                                    suiteState.fullTestsCompleted.toFloat() / suiteState.fullTestsTotal.toFloat()
+                                suiteState.modelCount > 0 ->
+                                    suiteState.quickPassed.toFloat() / suiteState.modelCount.toFloat()
+                                else -> 0f
+                            }.coerceIn(0f, 1f)
+                        },
+                        modifier = Modifier.fillMaxWidth().height(6.dp),
+                        color = NeonCyan,
+                        trackColor = DarkSurfaceVariant
+                    )
+                    Text(suiteState.message, color = TextSecondary, fontSize = 11.sp)
+                    OutlinedButton(onClick = onAbort, modifier = Modifier.fillMaxWidth()) {
+                        Text("Testreihe abbrechen", color = LaserCrimson)
+                    }
+                } else {
+                    Text(
+                        suiteState.message,
+                        color = if (suiteState.error == null) MatrixGreen else LaserCrimson,
+                        fontSize = 11.sp
+                    )
+                    suiteState.error?.let { Text(it, color = LaserCrimson, fontSize = 11.sp) }
                 }
             }
         }
