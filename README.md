@@ -40,7 +40,7 @@ Die GitHub-Actions-Pipeline baut die Debug-APK, führt JVM-/Robolectric-Tests au
 ## Installation und erster Modelltest
 
 1. Die APK `LLM-Lab-Standalone-debug.apk` aus dem Actions-Artefakt herunterladen und auf dem Android-Zielgerät installieren.
-2. Im Bereich **Modell** kann ein Qwen-GGUF-Modell per **Download** über den Hintergrund-Download von Hugging Face bezogen werden. Alternativ lässt sich unter **Eigenes GGUF-Modell importieren** eine lokale Datei auswählen. Der Download-Code setzt `.part`-Dateien fort und prüft GGUF-Header sowie SHA-256 vor der Freigabe. **Bekannter Downloadfehler:** Android meldete beim Einplanen des Netzwerkjobs, dass `android.permission.ACCESS_NETWORK_STATE` fehlt. Die Berechtigung ist jetzt im Manifest deklariert. Ob der Download danach auf dem Zielgerät tatsächlich funktioniert, ist noch nicht durch einen neuen Gerätelauf bestätigt.
+2. Im Bereich **Modell** kann ein Qwen-GGUF-Modell per **Download** von Hugging Face bezogen werden. Alternativ lässt sich unter **Eigenes GGUF-Modell importieren** eine lokale Datei auswählen. Der Download läuft als vom Nutzer gestarteter `dataSync`-Foreground-Service; neue Downloads verwenden nicht mehr den Android-14+-JobScheduler-Netzwerk-Constraint. Der Download-Code setzt `.part`-Dateien fort und prüft GGUF-Header sowie SHA-256 vor der Freigabe. Der neue Service-Pfad ist noch nicht durch einen erfolgreichen Gerätelauf bestätigt.
 3. Nach erfolgreicher Prüfung wird das ausgewählte Modell zur Initialisierung angeboten. **Modell jetzt initialisieren** startet das native Laden; erst danach erscheint der Status **Modell einsatzbereit**.
 4. Im **Prompt-Testlabor** die automatische Qwen-Matrix starten: **Quick-Pretest** prüft alle vier Modelle einzeln. **Quick → Full** startet die vollständigen 80 Einzelprofile nur dann, wenn alle vier Quick-Checks bestanden wurden.
 5. Im Prompt-Testlabor können außerdem die sieben Einzelworkflows für Durchsatz, DMS, JSON-Extraktion, Vulkan-Hardware-Tuning, Sampling und zwei reproduzierbare Prompt-Prefill-Längen separat ausgeführt werden.
@@ -68,7 +68,7 @@ Der separate Stabilitätscheck führt drei echte Kurz-Inferenzen aus. Timeout, n
 - **Vulkan bleibt experimentell.** Die Prozessisolation ermöglicht den harten Timeout-/Abort-Pfad durch Prozessbeendigung; sie ist kein Beleg dafür, dass ein Vulkan-Kernel selbst kooperativ abbricht oder ein Vulkan-Fehler behoben wäre.
 - Der Speicherschutz prüft vor Modellinitialisierungen den verfügbaren Speicher gegen 1,5× der im Modellkatalog geschätzten Modellgröße. Androids kritische Memory-Pressure-Meldungen brechen die laufende Suite ab. Das ist eine Schutzmaßnahme, aber keine Garantie gegen jede mögliche systemweite Speichersituation.
 - Hersteller-NPUs sind nicht enthalten; Details und Voraussetzungen stehen unter [docs/npu-backend.md](docs/npu-backend.md).
-- Der aktuelle Hugging-Face-Downloadpfad hat einen gemeldeten Fehler auf der installierten Version und ist bis zur Diagnose und einem echten erfolgreichen Gerätetest nicht als abgenommen zu betrachten.
+- Der frühere Hugging-Face-Downloadpfad über JobScheduler/Netzwerk-Constraint wurde durch einen direkten `dataSync`-Foreground-Service ersetzt. Die Behebung ist erst nach einem erfolgreichen Download auf dem Zielgerät bestätigt; bis dahin gilt der Download weiterhin als nicht geräteverifiziert.
 
 ## Device Acceptance (Gate für myDocAnizer-Integration)
 

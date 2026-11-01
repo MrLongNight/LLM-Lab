@@ -31,6 +31,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -68,13 +69,12 @@ object HuggingFaceDownloadBackgroundManager {
     fun enqueue(context: Context, models: List<HuggingFaceModel>) {
         val app = context.applicationContext
         if (models.isEmpty()) return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            enqueueUserInitiatedJobs(app, models)
-        } else {
-            val intent = Intent(app, HuggingFaceModelDownloadForegroundService::class.java)
-                .putStringArrayListExtra(EXTRA_MODEL_IDS, ArrayList(models.map { it.id }))
-            ContextCompat.startForegroundService(app, intent)
-        }
+
+        // Start directly from the visible, user-initiated download action. This avoids the
+        // Android 14+ JobScheduler network-constraint permission path entirely.
+        val intent = Intent(app, HuggingFaceModelDownloadForegroundService::class.java)
+            .putStringArrayListExtra(EXTRA_MODEL_IDS, ArrayList(models.map { it.id }))
+        ContextCompat.startForegroundService(app, intent)
     }
 
     suspend fun download(
@@ -165,15 +165,16 @@ object HuggingFaceDownloadBackgroundManager {
             cancelled += modelId
             prefs.edit().putStringSet(KEY_CANCELLED_IDS, cancelled).apply()
         }
+        // Also cancel a UIDT job left behind by an older app version, then notify the
+        // foreground service used by current versions.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             jobIdFor(modelId)?.let { app.getSystemService(JobScheduler::class.java)?.cancel(it) }
-        } else {
-            app.startService(
-                Intent(app, HuggingFaceModelDownloadForegroundService::class.java)
-                    .setAction(ACTION_CANCEL)
-                    .putExtra(EXTRA_MODEL_ID, modelId)
-            )
         }
+        app.startService(
+            Intent(app, HuggingFaceModelDownloadForegroundService::class.java)
+                .setAction(ACTION_CANCEL)
+                .putExtra(EXTRA_MODEL_ID, modelId)
+        )
     }
 
     internal fun isExplicitlyCancelled(context: Context, modelId: String): Boolean {
@@ -375,6 +376,8 @@ class HuggingFaceModelDownloadForegroundService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var processor: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private val activeDownloadJobs = ConcurrentHashMap<String, Job>()
+    private val cancelledByUserIds = ConcurrentHashMap.newKeySet<String>()
 
     override fun onCreate() {
         super.onCreate()
@@ -387,11 +390,17 @@ class HuggingFaceModelDownloadForegroundService : Service() {
         if (intent?.action == HuggingFaceDownloadBackgroundManager.ACTION_CANCEL) {
             val modelId = intent.getStringExtra(HuggingFaceDownloadBackgroundManager.EXTRA_MODEL_ID)
             if (modelId != null) {
+                val model = HuggingFaceModelCatalog.find(modelId) ?: return START_NOT_STICKY
+                cancelledByUserIds.add(modelId)
                 val pending = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(this)
                 pending.remove(modelId)
                 HuggingFaceDownloadBackgroundManager.saveFallbackIds(this, pending)
-                HuggingFaceDownloadBackgroundManager.broadcastFailed(this,
-                    HuggingFaceModelCatalog.find(modelId) ?: return START_NOT_STICKY,
+                activeDownloadJobs[modelId]?.cancel(
+                    CancellationException("Download wurde vom Nutzer abgebrochen.")
+                )
+                HuggingFaceDownloadBackgroundManager.broadcastFailed(
+                    this,
+                    model,
                     "Download wurde vom Nutzer abgebrochen. Der bisherige Fortschritt bleibt erhalten."
                 )
             }
@@ -428,6 +437,16 @@ class HuggingFaceModelDownloadForegroundService : Service() {
                 batch.map { modelId ->
                     async {
                         val model = HuggingFaceModelCatalog.find(modelId) ?: return@async
+                        if (cancelledByUserIds.remove(modelId)) return@async
+
+                        val ownJob = currentCoroutineContext()[Job]
+                        if (ownJob != null) activeDownloadJobs[modelId] = ownJob
+                        // Close the race where cancellation arrives immediately before the
+                        // child coroutine is registered in activeDownloadJobs.
+                        if (cancelledByUserIds.contains(modelId)) {
+                            ownJob?.cancel(CancellationException("Download wurde vom Nutzer abgebrochen."))
+                        }
+
                         var finished = false
                         try {
                             HuggingFaceModelDownloader(applicationContext).download(model) { downloaded, total ->
@@ -442,14 +461,20 @@ class HuggingFaceModelDownloadForegroundService : Service() {
                             HuggingFaceDownloadBackgroundManager.broadcastCompleted(applicationContext, model)
                             finished = true
                         } catch (cancelled: CancellationException) {
-                            // A system stop is resumable: retain the queued model ID and its .part file.
-                            throw cancelled
+                            // User cancellation is isolated to this model. System/service cancellation
+                            // still propagates so the resumable .part file can be resumed later.
+                            if (cancelledByUserIds.remove(modelId)) {
+                                finished = true
+                            } else {
+                                throw cancelled
+                            }
                         } catch (error: Throwable) {
                             HuggingFaceDownloadBackgroundManager.broadcastFailed(
                                 applicationContext, model, error.message ?: error.javaClass.simpleName
                             )
                             finished = true
                         } finally {
+                            if (ownJob != null) activeDownloadJobs.remove(modelId, ownJob)
                             if (finished) {
                                 val pending = HuggingFaceDownloadBackgroundManager.pendingFallbackIds(this@HuggingFaceModelDownloadForegroundService)
                                 pending.remove(model.id)
