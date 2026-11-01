@@ -426,14 +426,28 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /**
+     * Search all app-private locations used by previous LLM Lab builds before
+     * showing a model as missing. Never delete or redownload a discovered file.
+     */
+    private fun findLocalHuggingFaceModel(model: com.example.engine.HuggingFaceModel): File? {
+        val context = getApplication<Application>()
+        val candidates = listOfNotNull(
+            File(context.filesDir, "models/${model.filename}"),
+            File(context.filesDir, model.filename),
+            context.getExternalFilesDir("models")?.let { File(it, model.filename) },
+            context.getExternalFilesDir(null)?.let { File(it, "models/${model.filename}") },
+            context.getExternalFilesDir(null)?.let { File(it, model.filename) }
+        ).distinctBy { it.absolutePath }
+        return candidates.firstOrNull { file ->
+            file.isFile && file.length() >= (model.estimatedSizeBytes * 0.85).toLong()
+        }
+    }
+
     fun refreshDownloadedModels() {
         viewModelScope.launch(Dispatchers.IO) {
-            val modelDirectory = File(getApplication<Application>().filesDir, "models")
             _downloadedModelIds.value = HuggingFaceModelCatalog.models
-                .filter { model ->
-                    val file = File(modelDirectory, model.filename)
-                    file.isFile && file.length() >= (model.estimatedSizeBytes * 0.85).toLong()
-                }
+                .filter { model -> findLocalHuggingFaceModel(model) != null }
                 .map { it.id }
                 .toSet()
         }
@@ -441,12 +455,12 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
 
     fun selectDownloadedHuggingFaceModel(modelId: String) {
         val model = HuggingFaceModelCatalog.find(modelId) ?: return
-        val file = File(File(getApplication<Application>().filesDir, "models"), model.filename)
-        if (!file.isFile || file.length() <= 0L) {
+        val file = findLocalHuggingFaceModel(model)
+        if (file == null) {
             refreshDownloadedModels()
             _huggingFaceDownload.value = HuggingFaceDownloadUiState(
                 modelId = modelId,
-                error = "Die lokale Modell-Datei wurde nicht gefunden. Bitte erneut herunterladen."
+                error = "In den lokalen App-Speichern wurde keine vollständige Datei gefunden. Es wird nichts gelöscht; bitte erst Speicher prüfen, bevor du erneut herunterlädst."
             )
             return
         }
