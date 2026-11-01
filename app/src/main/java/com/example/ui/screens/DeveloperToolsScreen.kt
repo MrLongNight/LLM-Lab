@@ -171,8 +171,9 @@ fun DeveloperToolsScreen(viewModel: LLMLabViewModel, onOpenSettings: () -> Unit)
 private fun DevSectionCard(title: String, content: @Composable ColumnScope.() -> Unit) {
     Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = DarkSurface),
         border = androidx.compose.foundation.BorderStroke(1.dp, DarkCardBorder)) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp), content = content) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             Text(title, color = NeonCyan, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            content()
         }
     }
 }

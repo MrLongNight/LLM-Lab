@@ -33,7 +33,7 @@ import java.io.ByteArrayInputStream
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
-class ExampleRobolectricTest {
+class EngineRobolectricTest {
 
     @Test
     fun `JVM host never reports simulated model loading or inference`() {
