@@ -55,6 +55,39 @@ class PromptResultValidatorTest {
     }
 
     @Test
+    fun quickChatRequiresOneGroundedGermanSentence() {
+        val testCase = AutomatedModelSuitePlan.quickRoutine().first { it.id == "chat-basic" }
+        val good = "Ein Dokumentenmanagementsystem speichert Dokumente digital und macht sie schnell auffindbar."
+        val tooShort = "Dokumente sind da."
+        val tooManySentences = "Ein DMS verwaltet Dokumente. Es erleichtert die Ablage."
+        assertTrue(PromptResultValidator.validate(testCase, good).passed)
+        assertFalse(PromptResultValidator.validate(testCase, tooShort).passed)
+        assertFalse(PromptResultValidator.validate(testCase, tooManySentences).passed)
+    }
+
+    @Test
+    fun quickDmsSmokeRequiresExactlyTwoGroundedSentences() {
+        val testCase = AutomatedModelSuitePlan.quickRoutine().first { it.id == "dms-smoke" }
+        val good = "Ein Dokumentenmanagementsystem speichert gescannte Dokumente zentral. OCR macht den Inhalt durchsuchbar und erleichtert die Suche."
+        val bad = "Dokumente werden gespeichert und sind durchsuchbar."
+        assertTrue(PromptResultValidator.validate(testCase, good).passed)
+        assertFalse(PromptResultValidator.validate(testCase, bad).passed)
+    }
+
+    @Test
+    fun quickJsonRequiresExactlyThreeFieldsAndGroundedAmountAndNullIban() {
+        val testCase = AutomatedModelSuitePlan.quickRoutine().first { it.id == "json-strict" }
+        val good = """{"sender":"Praxis Dr. med. Martin Müller","totalAmount":149.50,"iban":null}"""
+        val wrongAmount = """{"sender":"Praxis Dr. med. Martin Müller","totalAmount":149.00,"iban":null}"""
+        val extraField = """{"sender":"Praxis Dr. med. Martin Müller","totalAmount":149.50,"iban":null,"date":null}"""
+        val fabricatedIban = """{"sender":"Praxis Dr. med. Martin Müller","totalAmount":149.50,"iban":"DE123"}"""
+        assertTrue(PromptResultValidator.validate(testCase, good).passed)
+        assertFalse(PromptResultValidator.validate(testCase, wrongAmount).passed)
+        assertFalse(PromptResultValidator.validate(testCase, extraField).passed)
+        assertFalse(PromptResultValidator.validate(testCase, fabricatedIban).passed)
+    }
+
+    @Test
     fun prefillWorkflowsRequireTheExpectedOcrSignal() {
         val relevant = "OCR"
         val irrelevant = "BEREIT"
