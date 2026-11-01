@@ -1527,29 +1527,22 @@ class LLMLabViewModel @JvmOverloads constructor(
             maxTokens = 32
         )
 
+        val models = HuggingFaceModelCatalog.models
+        val requiredModels = if (request.mode == com.example.engine.SuiteMode.SINGLE) {
+            models.filter { it.id == request.singleModel }
+        } else {
+            models
+        }
+        val modelDirectory = File(getApplication<Application>().filesDir, "models")
         automatedSuiteAbortRequested.set(false)
-        launchEngineOperation {
-            val models = HuggingFaceModelCatalog.models
-            _automatedSuite.value = AutomatedModelSuiteUiState(
-                isRunning = true,
-                phase = "DOWNLOAD",
-                modelCount = models.size,
-                message = "Automatische Qwen-Testreihe wird vorbereitet."
-            )
-            _labTestOutput.value = "Automatische Qwen-Testreihe gestartet."
-            _config.value = suiteConfig
-            try {
-                val modelDirectory = File(getApplication<Application>().filesDir, "models")
-                if (!modelDirectory.exists() && !modelDirectory.mkdirs()) {
-                    throw IOException("Der interne Modellordner konnte nicht angelegt werden.")
-                }
 
-                val requiredModels = if (request.mode == com.example.engine.SuiteMode.SINGLE) {
-                    models.filter { it.id == request.singleModel }
-                } else {
-                    models
-                }
-                val remainingModelBytes = requiredModels.sumOf { model ->
+        // Register Android's user-initiated transfer jobs immediately from the visible
+        // suite action, before waiting for any previous native engine operation to finish.
+        try {
+            if (!modelDirectory.exists() && !modelDirectory.mkdirs()) {
+                throw IOException("Der interne Modellordner konnte nicht angelegt werden.")
+            }
+            val remainingModelBytes = requiredModels.sumOf { model ->
                     val complete = File(modelDirectory, model.filename)
                     val partial = File(modelDirectory, "${model.filename}.part")
                     when {
@@ -1568,10 +1561,31 @@ class LLMLabViewModel @JvmOverloads constructor(
                     )
                 }
 
-                // Schedule every requested transfer while the user-initiated suite is foregrounded.
-                // The coordinator then awaits the same jobs in batches of at most two.
-                HuggingFaceDownloadBackgroundManager.enqueue(getApplication(), requiredModels)
+            HuggingFaceDownloadBackgroundManager.enqueue(getApplication(), requiredModels)
+        } catch (error: Exception) {
+            val message = error.message ?: error.javaClass.simpleName
+            _automatedSuite.value = AutomatedModelSuiteUiState(
+                isRunning = false,
+                phase = "ERROR",
+                message = "Suite konnte nicht vorbereitet werden.",
+                error = message
+            )
+            _labTestOutput.value = "Suite konnte nicht vorbereitet werden: $message"
+            return
+        }
 
+        _automatedSuite.value = AutomatedModelSuiteUiState(
+            isRunning = true,
+            phase = "DOWNLOAD",
+            currentModelIndex = 0,
+            modelCount = requiredModels.size,
+            message = "Hintergrund-Downloads eingeplant; maximal zwei gleichzeitig."
+        )
+        _labTestOutput.value = "Automatische Qwen-Testreihe gestartet."
+        _config.value = suiteConfig
+
+        launchEngineOperation {
+            try {
                 automatedSuiteCoordinator.run(
                     request = request,
                     models = models,
