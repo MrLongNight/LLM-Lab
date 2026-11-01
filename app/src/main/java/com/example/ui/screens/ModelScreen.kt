@@ -34,7 +34,6 @@ fun ModelScreen(viewModel: LLMLabViewModel) {
     val config by viewModel.config.collectAsState()
     val downloadedModelIds by viewModel.downloadedModelIds.collectAsState()
     val huggingFaceDownload by viewModel.huggingFaceDownload.collectAsState()
-    val automatedSuite by viewModel.automatedSuite.collectAsState()
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -107,11 +106,7 @@ fun ModelScreen(viewModel: LLMLabViewModel) {
         HuggingFaceModelsCard(
             viewModel = viewModel,
             downloadedModelIds = downloadedModelIds,
-            downloadState = huggingFaceDownload,
-            suiteState = automatedSuite,
-            onQuickCheck = { viewModel.runQwenQuickCheck() },
-            onQuickThenFull = { viewModel.runQwenQuickThenFull() },
-            onCancelSuite = { viewModel.requestAbort() }
+            downloadState = huggingFaceDownload
         )
 
         // Dateiauswahl & Aktionen
@@ -125,14 +120,14 @@ fun ModelScreen(viewModel: LLMLabViewModel) {
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    text = "GGUF-Datei wählen",
+                    text = "Eigenes GGUF-Modell importieren",
                     color = TextPrimary,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold
                 )
 
                 Text(
-                    text = "Zielmodell: qwen2.5-1.5b-instruct-q4_k_m.gguf (~1,12 GB).\nWähle die Datei von deinem Gerätespeicher oder Downloads-Ordner.",
+                    text = "Importiere eine eigene GGUF-Datei aus deinem Gerätespeicher oder Downloads-Ordner. Qwen-Modelle kannst du oben direkt und SHA-256-geprüft herunterladen.",
                     color = TextSecondary,
                     fontSize = 13.sp
                 )
@@ -144,7 +139,7 @@ fun ModelScreen(viewModel: LLMLabViewModel) {
                     Button(
                         onClick = { filePicker.launch(arrayOf("*/*")) },
                         colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
-                        enabled = !automatedSuite.isRunning,
+                        enabled = !huggingFaceDownload.isDownloading,
                         modifier = Modifier
                             .weight(1f)
                             .testTag("select_model_file_button")
@@ -332,10 +327,6 @@ private fun HuggingFaceModelsCard(
     viewModel: LLMLabViewModel,
     downloadedModelIds: Set<String>,
     downloadState: com.example.ui.HuggingFaceDownloadUiState,
-    suiteState: com.example.ui.AutomatedModelSuiteUiState,
-    onQuickCheck: () -> Unit,
-    onQuickThenFull: () -> Unit,
-    onCancelSuite: () -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -375,7 +366,7 @@ private fun HuggingFaceModelsCard(
                                     else -> viewModel.downloadHuggingFaceModel(model.id)
                                 }
                             },
-                            enabled = !suiteState.isRunning && (isActiveDownload || downloaded || !downloadState.isDownloading),
+                            enabled = isActiveDownload || !downloadState.isDownloading,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = if (isActiveDownload) LaserCrimson else if (downloaded) MatrixGreen else NeonCyan,
                                 contentColor = Color.Black,
@@ -423,59 +414,6 @@ private fun HuggingFaceModelsCard(
                 }
             }
 
-            HorizontalDivider(color = DarkCardBorder)
-            Text("AUTOMATISCHER MODELLVERGLEICH", color = NeonCyan, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-            Text(
-                "Die App schaltet nacheinander alle vier Modelle durch. Der Quick-Preflight prüft Modellladen, echte Vulkan-Layer-Zuordnung und eine kurze Inferenz. Nur wenn alle vier Modelle bestehen, startet die Full-Routine automatisch.",
-                color = TextSecondary,
-                fontSize = 12.sp
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                OutlinedButton(
-                    onClick = onQuickCheck,
-                    enabled = !suiteState.isRunning,
-                    modifier = Modifier.weight(1f).testTag("qwen_quick_check_button")
-                ) {
-                    Text("Quick-Check", fontSize = 11.sp)
-                }
-                Button(
-                    onClick = onQuickThenFull,
-                    enabled = !suiteState.isRunning,
-                    colors = ButtonDefaults.buttonColors(containerColor = MatrixGreen, contentColor = Color.Black),
-                    modifier = Modifier.weight(1f).testTag("qwen_quick_full_button")
-                ) {
-                    Text("Quick → Full", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-            if (suiteState.isRunning || suiteState.phase != "IDLE") {
-                Text(
-                    "${suiteState.phase} · Modell ${suiteState.currentModelIndex}/${suiteState.modelCount} · Quick bestanden: ${suiteState.quickPassed}/${suiteState.modelCount} · Full: ${suiteState.fullTestsCompleted}/${suiteState.fullTestsTotal}",
-                    color = if (suiteState.error == null) NeonCyan else LaserCrimson,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace
-                )
-                if (suiteState.isRunning) {
-                    LinearProgressIndicator(
-                        progress = {
-                            when {
-                                suiteState.fullTestsTotal > 0 -> suiteState.fullTestsCompleted.toFloat() / suiteState.fullTestsTotal.toFloat()
-                                suiteState.modelCount > 0 -> suiteState.quickPassed.toFloat() / suiteState.modelCount.toFloat()
-                                else -> 0f
-                            }.coerceIn(0f, 1f)
-                        },
-                        modifier = Modifier.fillMaxWidth().height(6.dp),
-                        color = NeonCyan,
-                        trackColor = DarkSurfaceVariant
-                    )
-                    Text(suiteState.message, color = TextSecondary, fontSize = 11.sp)
-                    OutlinedButton(onClick = onCancelSuite, modifier = Modifier.fillMaxWidth()) {
-                        Text("Testreihe abbrechen", color = LaserCrimson)
-                    }
-                } else {
-                    Text(suiteState.message, color = if (suiteState.error == null) MatrixGreen else LaserCrimson, fontSize = 11.sp)
-                    suiteState.error?.let { Text(it, color = LaserCrimson, fontSize = 11.sp) }
-                }
-            }
         }
     }
 }
