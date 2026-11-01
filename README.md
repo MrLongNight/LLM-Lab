@@ -1,27 +1,43 @@
-# LLM Lab – Mobile Inference Testbench
+# LLM Engine – Integrationsprototyp für myDocAnizer
 
-Eigenständige Android-Test-App zur Untersuchung echter lokaler GGUF-Inferenz auf dem späteren myDocAnizer-Zielgerät. Dieses Repository ist unabhängig von `myDocAnizer-Mobile`; Änderungen hier verändern das Hauptprojekt nicht.
+Dieses Repository entwickelt und verifiziert die lokale GGUF-Inferenz-Engine, die später in myDocAnizer-Mobile integriert wird. Es ist **kein eigenständiges Endnutzerprodukt**. Die Android-Oberfläche ist nur ein schlanker Debug- und Funktionscontainer, damit Engine, Modell-Download und Inferenz auf realer Hardware geprüft werden können.
 
-## Architektur und harte Grenzen
+## Produktziel und Prioritäten
+
+Die Engine ist das Produkt. Die Debug-Oberfläche ist austauschbar und darf die spätere myDocAnizer-Bedienoberfläche nicht vorwegnehmen.
+
+1. **Korrektheit:** zuverlässiges Modellladen, echte Token-Ausgabe, saubere Fehlerzustände, kontrollierter Abbruch und keine erfundenen Messwerte.
+2. **Performance:** Prefill-Latenz, First-Token-Latenz, Generierungsdurchsatz, Speicherbedarf und thermisches Verhalten auf dem Zielgerät messen und verbessern.
+3. **Stabilität:** keine ANRs, Deadlocks, Speicherüberläufe oder hängenbleibenden Inferenzprozesse; Timeouts müssen den nativen Aufruf zuverlässig beenden.
+4. **Integration:** InferenceClient ist die API-Grenze zum isolierten Inferenzprozess. Die Engine darf nicht von Compose-Screens oder UI-Navigation abhängig sein.
+
+## Schlanker Debug-Container
+
+Die normale Oberfläche hat nur zwei Arbeitsbereiche: **Modell** (Modell auswählen/herunterladen/laden) und **Inferenz** (manuelle Funktionsprobe). Entwicklungstests, Benchmarks, Telemetrie, Fehlerhistorie und Exporte befinden sich zusammen in einer einzigen Entwicklungsansicht, die nur im Debug-Build über das Menü erreichbar ist. Erweiterte Laufzeitparameter sind ebenfalls nur dort zugänglich.
+
+Prompt-Tests, automatisierte Suites und Benchmarks sind **Entwicklungs- und Abnahmewerkzeuge**, keine Produktfunktionen. Sie werden nicht auf mehrere App-Bereiche verteilt. Alle Mess- und Testergebnisse liegen in derselben lokalen Room-Historie und werden zentral angezeigt/exportiert. Chat-Prompts und -Antworten werden in dieser Historie weiterhin redigiert gespeichert; nur technische Messwerte und Fehlerdaten bleiben erhalten.
+
+## Technische Architektur
 
 - Android, Kotlin, Jetpack Compose, Room und C++/JNI.
-- Native Engine: `llama.cpp`, fest gepinnt als Git-Submodul unter `third_party/llama.cpp` auf Commit `78feec062d50ec9e8940244cac918ac4480b60cb` (API-Version `0.8.0-dev`).
-- Native Inferenz läuft in einem separaten Android-Prozess `:inference`; die Backends und ihr Status sind im Abschnitt [Backends](#backends) beschrieben.
-- Ein importiertes GGUF-Modell wird über den Android-Dateiauswahldialog ausgewählt und vor dem nativen Laden in den internen App-Speicher kopiert. Verifizierte Hugging-Face-Modelle bleiben dauerhaft unter `filesDir/models`; sie werden nicht zusätzlich als `active_model.gguf` dupliziert. Modelle sind nicht in der APK enthalten.
-- Eigenständige Package-ID: `de.mrlongnight.llmlab`; `minSdk=29` (Android 10), `targetSdk=36`, ABIs `arm64-v8a` und `x86_64`.
-- Keine Firebase-, Gemini-, Cloud-Inferenz-, Login- oder externen KI-API-Abhängigkeiten. Internetzugriff wird ausschließlich für vom Nutzer gestartete HTTPS-Downloads der Qwen-GGUF-Dateien von Hugging Face verwendet; die Inferenz läuft anschließend lokal. Android-App-Backup ist deaktiviert.
+- Native Engine: llama.cpp, fest gepinnt als Git-Submodul unter third_party/llama.cpp auf Commit 78feec062d50ec9e8940244cac918ac4480b60cb (API-Version 0.8.0-dev).
+- Native Inferenz läuft im separaten Android-Prozess :inference. InferenceClient kapselt Verbindung, Binder-Aufrufe und harten Timeout-/Abort-Pfad. Neue Integrationen sollen nicht direkt LlamaNativeBridge oder JNI aufrufen.
+- Modell-Dateien liegen dauerhaft im internen App-Speicher unter filesDir/models; sie werden nicht zusätzlich als active_model.gguf dupliziert. Modelle sind nicht Teil der APK.
+- Debug-Package-ID: de.mrlongnight.llmlab; minSdk=29, targetSdk=36, ABIs arm64-v8a und x86_64. Die Package-ID macht den Debug-Container nicht zu einem eigenständigen Produkt.
+- Keine Firebase-, Gemini-, Cloud-Inferenz-, Login- oder externen KI-API-Abhängigkeiten. Internet wird ausschließlich für vom Nutzer gestartete HTTPS-Modell-Downloads von Hugging Face verwendet; die Inferenz läuft lokal. Android-App-Backup ist deaktiviert.
 
-Die App darf „Modell bereit“ erst anzeigen, wenn Modell und llama.cpp-Kontext erfolgreich initialisiert wurden. Bei fehlender nativer Bibliothek gibt es keinen JVM-Ersatzpfad. Die Backend-Registry meldet verfügbare Backends und deren Eigenschaften. Der Standardpfad `AUTO` bleibt auf CPU; Vulkan wird nur mit `ACCELERATOR_REQUIRED` ausdrücklich angefordert.
+Die Engine darf „Modell bereit“ erst melden, wenn Modell und llama.cpp-Kontext erfolgreich initialisiert wurden. Bei fehlender nativer Bibliothek gibt es keinen JVM-Ersatzpfad. AUTO verwendet derzeit CPU; Vulkan wird ausdrücklich über ACCELERATOR_REQUIRED angefordert.
 
-## Backends
+## Backends und aktueller Stand
 
-- **CPU – stabil:** sicherer Referenzpfad; `AUTO` verwendet derzeit CPU.
-- **Vulkan – experimentell:** generisches GPU-Backend, ausdrücklich über `ACCELERATOR_REQUIRED` angefordert. Es läuft ebenfalls isoliert in `:inference`; ein harter Timeout/Abort kann diesen Prozess beenden. Das ist keine Aussage, dass Vulkan-Kernel kooperativ abbrechen oder ein Vulkan-Fehler behoben wäre.
-- **NPU – nicht enthalten:** derzeit kein Qualcomm-QNN/Hexagon-, MediaTek-NeuroPilot- oder anderes Hersteller-NPU-Backend. Details: [docs/npu-backend.md](docs/npu-backend.md).
+- **CPU – stabiler Referenzpfad:** AUTO verwendet derzeit CPU.
+- **Vulkan – experimentell:** generisches GPU-Backend. Prozessisolation ermöglicht den harten Timeout-/Abort-Pfad, beweist aber weder kooperativen Abbruch innerhalb eines Vulkan-Kernels noch die Fehlerfreiheit des Backends.
+- **NPU – nicht enthalten:** Qualcomm-QNN/Hexagon, MediaTek-NeuroPilot und andere Hersteller-NPU-Backends sind derzeit nicht integriert. Details: docs/npu-backend.md.
+- **Hugging Face Download:** neue Downloads werden direkt als vom Nutzer gestarteter dataSync-Foreground-Service ausgeführt, nicht mehr über den JobScheduler-Netzwerk-Constraint. Der Pfad ist erst nach erfolgreichem Download auf dem Zielgerät abgenommen.
 
-## Build und Tests
+## Build und Entwicklungsprüfungen
 
-Voraussetzungen: JDK 21, Android SDK, Android NDK `30.0.16248370`, CMake `3.31.6` und Git-Submodule-Unterstützung. Für den Vulkan-Host-Build unter Ubuntu/Debian werden außerdem `glslc`, `libvulkan-dev` und `spirv-headers` benötigt.
+Voraussetzungen: JDK 21, Android SDK, Android NDK 30.0.16248370, CMake 3.31.6, Git-Submodule-Unterstützung und für den Vulkan-Host-Build glslc, libvulkan-dev sowie spirv-headers.
 
 ```bash
 git clone --recurse-submodules https://github.com/MrLongNight/LLM-Lab.git
@@ -31,88 +47,38 @@ chmod +x gradlew
 ./gradlew assembleDebug --no-daemon
 ./gradlew testDebugUnitTest --no-daemon
 ./gradlew assembleDebugAndroidTest --no-daemon
-# Auf einem verbundenen Android-Zielgerät:
+# Nur auf einem verbundenen Android-Zielgerät:
 ./gradlew connectedDebugAndroidTest
 ```
 
-Die GitHub-Actions-Pipeline baut die Debug-APK, führt JVM-/Robolectric-Tests aus und kompiliert zusätzlich das Android-Test-APK. Sie veröffentlicht das Artefakt `LLM-Lab-Standalone-Debug-APK`. CI grün ≠ geräteverifiziert: Ohne angeschlossenes Zielgerät werden die Instrumentationstests nicht ausgeführt.
+GitHub Actions baut den Debug-Container, führt JVM-/Robolectric-Tests aus, kompiliert Instrumentationstests und prüft die nativen Bibliotheken im APK. **CI grün ist kein Geräteabnahmetest.** Die Tests auf dem tatsächlichen Zielgerät bleiben ein separates Gate.
 
-## Installation und erster Modelltest
+## Relevante Inferenzmesswerte
 
-1. Die APK `LLM-Lab-Standalone-debug.apk` aus dem Actions-Artefakt herunterladen und auf dem Android-Zielgerät installieren.
-2. Im Bereich **Modell** kann ein Qwen-GGUF-Modell per **Download** von Hugging Face bezogen werden. Alternativ lässt sich unter **Eigenes GGUF-Modell importieren** eine lokale Datei auswählen. Der Download läuft als vom Nutzer gestarteter `dataSync`-Foreground-Service; neue Downloads verwenden nicht mehr den Android-14+-JobScheduler-Netzwerk-Constraint. Der Download-Code setzt `.part`-Dateien fort und prüft GGUF-Header sowie SHA-256 vor der Freigabe. Der neue Service-Pfad ist noch nicht durch einen erfolgreichen Gerätelauf bestätigt.
-3. Nach erfolgreicher Prüfung wird das ausgewählte Modell zur Initialisierung angeboten. **Modell jetzt initialisieren** startet das native Laden; erst danach erscheint der Status **Modell einsatzbereit**.
-4. Im **Prompt-Testlabor** die automatische Qwen-Matrix starten: **Quick-Pretest** prüft alle vier Modelle einzeln. **Quick → Full** startet die vollständigen 80 Einzelprofile nur dann, wenn alle vier Quick-Checks bestanden wurden.
-5. Im Prompt-Testlabor können außerdem die sieben Einzelworkflows für Durchsatz, DMS, JSON-Extraktion, Vulkan-Hardware-Tuning, Sampling und zwei reproduzierbare Prompt-Prefill-Längen separat ausgeführt werden.
-6. Bei Fehlern TXT- und JSON-Diagnoseexport erzeugen. Chat-Prompt und Chat-Antwort werden in der lokalen Testhistorie redigiert gespeichert.
+Die native Schicht liefert reale Werte für Tokenisierung, Prompt-Tokenanzahl, Prefill-Dauer, First-Token-Latenz, generierte Tokens, Generierungsdauer, Decode-Aufrufe und Gesamtdauer. Vor Abschluss der Prefill-Messung wird llama_synchronize() aufgerufen, damit asynchron eingereichte Vulkan-Arbeit nicht fälschlich als Wartezeit nach dem Prefill erscheint. Gerätemesswerte, die Android nicht zuverlässig bereitstellt, müssen als nicht verfügbar behandelt werden. Der native Allocator-Heap umfasst nicht zwingend alle per mmap eingeblendeten Modellgewichte.
 
-## Inferenzmesswerte
+## Geräteabnahme vor der Integration
 
-Die JNI-Schicht liefert tatsächliche Werte aus `llama.cpp`: Prompt-Tokenisierung, Prompt-Tokenanzahl, Prompt-Evaluierungsdauer, Prompt-Decode-Aufrufe, First-Token-Latenz, generierte Tokens, Generierungsdauer, Generierungs-Decode-Aufrufe, Gesamtdauer sowie getrennten Prefill- und Generierungsdurchsatz. Vor dem Abschluss der Prefill-Messung wird `llama_synchronize()` aufgerufen. Damit wird asynchron eingereichte Vulkan-Arbeit der Prompt-Evaluierung zugerechnet und nicht mehr fälschlich als Wartezeit nach dem Prefill ausgewiesen. Die CPU-Auslastung wird zusätzlich direkt um jeden Inferenzlauf gemessen, statt einen bis zu drei Sekunden alten Telemetrie-Snapshot zu verwenden. Der Diagnoseexport weist außerdem die Zeit zwischen abgeschlossenem Prefill und erstem Token, die Profilvorbereitung sowie den Prozess-PSS inklusive anteilig gemappter Modellseiten aus.
+Die Integration in myDocAnizer-Mobile wird erst freigegeben, wenn diese Punkte auf dem tatsächlichen Zielgerät erfolgreich geprüft und mit Datum/Gerät dokumentiert sind:
 
-Der Prompt-Callback meldet Fortschritt während der Prompt-Auswertung. Während der eigentlichen Token-Generierung wird der echte Token-Stream angezeigt. Gerätemesswerte, die Android nicht zuverlässig bereitstellt, müssen als nicht verfügbar behandelt werden. Der native Allocator-Heap umfasst nicht zwingend alle per `mmap` eingeblendeten Modellgewichte.
-
-## Testprofile
-
-Für reproduzierbare Vergleiche hält die Matrix `n_ctx=2048`, `n_batch=512` und die Sampling-Baseline konstant. Nur der Durchsatzworkflow enthält zwei Profile: eine CPU-only-Referenz (4/8 Threads, `n_ubatch=64`) und Vulkan-Offload (4/8 Threads, `n_ubatch=64`). DMS, JSON-Extraktion, Hardware-, Sampling- und beide Prefill-Workflows verlangen Vulkan über `ACCELERATOR_REQUIRED`; die maximale Tokenzahl und das Zeitlimit sind je Workflow begrenzt.
-
-Das Prompt-Labor bietet sieben Workflows: (1) längere deutsche Antwort für Durchsatz, (2) zweisätzige DMS-Erklärung, (3) synthetische Rechnungs-Extraktion mit sieben JSON-Feldern einschließlich `iban=null` und `poNumber=null`, (4) Vulkan-Hardware-Tuning mit fünf Profilen (2/4/6/8 Threads sowie zusätzlich ubatch 128), (5) Sampling-Tuning mit fünf Varianten, (6) mittleres und (7) langes Prompt-Prefill mit jeweils drei Vulkan-ubatch-Profilen (32/64/128). Beim Sampling-Tuning bleibt Vulkan aktiv; Temperatur, Top-K und Top-P werden einzeln gegenüber der Baseline verändert. Die ursprüngliche Modellkonfiguration wird anschließend wiederhergestellt.
-
-Sampling-Parameter bleiben innerhalb eines Dreiervergleichs identisch, damit Unterschiede primär auf Backend, Threads und Micro-Batch zurückgeführt werden können. Native llama.cpp-Kernel werden auch im Debug-APK mit `-O3` kompiliert.
-
-Der separate Stabilitätscheck führt drei echte Kurz-Inferenzen aus. Timeout, nativer Fehler oder eine falsche Antwort beenden den Lauf automatisch.
-
-## Limitations
-
-- Native Aufrufe laufen im separaten Android-Prozess `:inference` und sind über das Beenden dieses Prozesses abbrechbar. Ein kooperativer Abbruch innerhalb eines laufenden nativen Vulkan-Aufrufs ist damit nicht zugesichert.
-- **Vulkan bleibt experimentell.** Die Prozessisolation ermöglicht den harten Timeout-/Abort-Pfad durch Prozessbeendigung; sie ist kein Beleg dafür, dass ein Vulkan-Kernel selbst kooperativ abbricht oder ein Vulkan-Fehler behoben wäre.
-- Der Speicherschutz prüft vor Modellinitialisierungen den verfügbaren Speicher gegen 1,5× der im Modellkatalog geschätzten Modellgröße. Androids kritische Memory-Pressure-Meldungen brechen die laufende Suite ab. Das ist eine Schutzmaßnahme, aber keine Garantie gegen jede mögliche systemweite Speichersituation.
-- Hersteller-NPUs sind nicht enthalten; Details und Voraussetzungen stehen unter [docs/npu-backend.md](docs/npu-backend.md).
-- Der frühere Hugging-Face-Downloadpfad über JobScheduler/Netzwerk-Constraint wurde durch einen direkten `dataSync`-Foreground-Service ersetzt. Die Behebung ist erst nach einem erfolgreichen Download auf dem Zielgerät bestätigt; bis dahin gilt der Download weiterhin als nicht geräteverifiziert.
-
-## Device Acceptance (Gate für myDocAnizer-Integration)
-
-Die Integration in `myDocAnizer-Mobile` ist erst freigegeben, wenn alle fünf Kriterien auf dem tatsächlichen Zielgerät erfolgreich geprüft und hier mit echtem Datum sowie Gerätebezeichnung eingetragen wurden.
-
-| Abnahmekriterium | Ergebnis | Datum | Gerät |
+| Kriterium | Ergebnis | Datum | Gerät |
 |---|:---:|---|---|
-| Modellinitialisierung mit einem lokalen GGUF-Modell erfolgreich |  |  |  |
-| SuiteMode.FULL: alle sieben Workflows erfolgreich durchgelaufen |  |  |  |
-| Abort-/Timeout-Pfad: Inference-Prozess beendet, erneute Verbindung und Modell-Reload erfolgreich |  |  |  |
-| Zehn kurze Inferenzläufe hintereinander ohne Exception oder Prozessabsturz |  |  |  |
-| Speicherdruck: Modell-Load wird bei verfügbarem RAM unter 1,5× Modellbedarf sauber abgewiesen; kritischer Memory-Pressure-Abbruch beendet die Suite |  |  |  |
+| GGUF-Modell laden und native Inferenz starten |  |  |  |
+| Download von Hugging Face einschließlich SHA-256-Prüfung |  |  |  |
+| Funktions-/Extraktionstests erfolgreich |  |  |  |
+| Abort/Timeout beendet Inferenzprozess; Reconnect und Reload funktionieren |  |  |  |
+| Zehn kurze Inferenzläufe ohne Exception oder Prozessabsturz |  |  |  |
+| Speicherdruck wird sauber abgefangen; kein ANR/OOM |  |  |  |
 
-Ein leeres Ergebnisfeld bedeutet **nicht getestet**. Häkchen, Datum und Gerät dürfen erst nach einem realen Lauf auf dem Zielgerät ergänzt werden. Die Tabelle wird nicht durch CI-Ergebnisse ersetzt.
+Leere Felder bedeuten **nicht getestet**. CI-Ergebnisse ersetzen keine echten Geräteläufe.
 
-`connectedDebugAndroidTest` deckt die Instrumentationstests für Modellinitialisierung, kurze Token-Generierung, Abort mit anschließendem Reconnect/Modell-Reload und zehn Wiederholungen ab. Der vollständige `SuiteMode.FULL`-Durchlauf mit sieben Workflows sowie der Speicherdrucktest sind zusätzliche Abnahmeschritte auf dem Zielgerät; sie werden durch diesen Instrumentationstest-Befehl derzeit nicht automatisch ausgeführt.
-
-## Integration Notes
-
-- **`InferenceClient` ist die stabile API-Grenze** für Verbindung, Binder-Aufrufe und den harten Timeout-/Abort-Pfad zur isolierten `:inference`-Service-Instanz. Neue Integrationen sollen nicht direkt `LlamaNativeBridge` oder JNI aufrufen.
-- **`TimeoutConfig.MOBILE` ist der Standardwert** für `SuiteRequest` und mobile Testläufe. `SuiteMode.FULL` nutzt in der aktuellen Suite-Implementierung bewusst das Legacy-Zeitprofil für längere Reproduktionsläufe.
-- **`SuiteMode.QUICK`** ist für den Alltags-Smoke-Test gedacht: drei kurze Workflows mit Backend-Präferenz `AUTO`.
-- **`SuiteMode.FULL`** ist für reproduzierbare Vergleichsläufe gedacht und enthält die sieben definierten Workflows mit der zugehörigen Profilmatrix sowie dem vorgeschalteten Quick-Check.
-- CI prüft Build, JVM-/Robolectric-Tests und die Kompilierung der Instrumentationstests. **CI grün ≠ geräteverifiziert** und ersetzt weder Modell-Download noch Inferenz, Abort, Wiederholung oder Speicherdruck auf dem Zielgerät.
-
-## Hugging Face: Qwen-Modellmatrix
-
-Die Modellverwaltung bietet vier direkt auswählbare GGUF-Dateien aus den offiziellen Hugging-Face-Repositories von Qwen:
+## Qwen-Modellkatalog
 
 | Parameter | Quantisierung | Datei |
 |---|---|---|
-| 0.5B | Q4_0 | `qwen2.5-0.5b-instruct-q4_0.gguf` |
-| 0.5B | Q4_K_M | `qwen2.5-0.5b-instruct-q4_k_m.gguf` |
-| 1.5B | Q4_0 | `qwen2.5-1.5b-instruct-q4_0.gguf` |
-| 1.5B | Q4_K_M | `qwen2.5-1.5b-instruct-q4_k_m.gguf` |
+| 0.5B | Q4_0 | qwen2.5-0.5b-instruct-q4_0.gguf |
+| 0.5B | Q4_K_M | qwen2.5-0.5b-instruct-q4_k_m.gguf |
+| 1.5B | Q4_0 | qwen2.5-1.5b-instruct-q4_0.gguf |
+| 1.5B | Q4_K_M | qwen2.5-1.5b-instruct-q4_k_m.gguf |
 
-Downloads laufen auf ausdrücklichen Tastendruck in den dauerhaften App-internen Ordner `filesDir/models`. Es gibt keine zweite vollständige Kopie als `active_model.gguf`. Unterbrochene Downloads werden über eine `.part`-Datei fortgesetzt. Vor der Freigabe werden GGUF-Header, Tensoranzahl und SHA-256 gegen den im Modellkatalog hinterlegten Hugging-Face-Wert geprüft. Die Inferenz danach erfolgt vollständig lokal.
-
-### Automatische Testreihe
-
-- `SuiteMode.QUICK` führt für die ausgewählten Modelle genau drei kurze Workflows (`chat-basic`, `dms-smoke`, `json-strict`) mit Backend-Präferenz `AUTO` aus. Dieser Modus ist der schnelle Alltags-Smoke-Test und kein Vulkan-Preflight.
-- `SuiteMode.FULL` führt die vollständige siebenstufige Workflow-Matrix aus. Vorher werden die Modelle geladen und der bestehende Quick-Check ausgeführt; die Full-Matrix wird nur nach bestandenem Preflight freigegeben.
-- Die Full-Routine umfasst sieben Workflows und 20 Einzelprofile je Modell (80 Gesamtprofile): Durchsatz (eine CPU-Referenz plus Vulkan), deutsche Instruktion, JSON-Extraktion, fünf Vulkan-Hardwareprofile, zwei Prefill-Längen mit jeweils drei Vulkan-ubatch-Profilen und fünf Vulkan-Samplingprofile.
-- CPU-only wird damit nur einmal pro Modell als Referenz gemessen. Die restlichen 76 Full-Profile sowie alle Quick-Checks laufen mit zwingend angefordertem Vulkan-Backend.
-- Nach der Testreihe wird das zuvor ausgewählte Modell und dessen Konfiguration wiederhergestellt.
-
-Die Prefill-Längen sind reproduzierbare Näherungswerte, keine vom Modelltokenizer exakt garantierten Tokenzahlen. Ein Vulkan-Backendname allein gilt nicht als Quick-Erfolg: Die Suite kontrolliert zusätzlich das native Modell-Ladelog auf echte GPU-Layer-Zuordnungen.
+Downloads laufen auf ausdrücklichen Tastendruck in filesDir/models. Unterbrochene Downloads werden über .part fortgesetzt. Vor der Freigabe werden GGUF-Header, Tensoranzahl und SHA-256 gegen den im Modellkatalog hinterlegten Wert geprüft.

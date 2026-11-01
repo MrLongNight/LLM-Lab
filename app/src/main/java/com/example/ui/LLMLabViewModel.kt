@@ -84,7 +84,6 @@ data class ChatMessage(
     val id: String = java.util.UUID.randomUUID().toString(),
     val isUser: Boolean,
     val text: String,
-    val metrics: NativeMetrics? = null,
     val isStreaming: Boolean = false
 )
 
@@ -854,7 +853,6 @@ class LLMLabViewModel @JvmOverloads constructor(
                                 if (response.isBlank()) "" else "\n\nTeiltext:\n$response"
                             else -> if (response.isEmpty()) "Keine Modellantwort erhalten." else response
                         },
-                        metrics = finalMetrics,
                         isStreaming = false
                     )
                 } else message

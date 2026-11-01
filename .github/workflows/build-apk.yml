@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build Standalone Android APK
+    name: Build LLM Engine Debug APK
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -40,7 +40,7 @@ jobs:
           if [ -f "debug.keystore.base64" ]; then
             base64 -d debug.keystore.base64 > debug.keystore
           elif [ ! -f "debug.keystore" ]; then
-            keytool -genkey -v -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=LLM Lab Standalone,O=MrLongNight,C=DE"
+            keytool -genkey -v -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=LLM Engine Debug Harness,O=MrLongNight,C=DE"
           fi
 
       - name: Install Vulkan build dependencies
@@ -121,15 +121,15 @@ jobs:
           PY
           echo "Runtime CPU variants and Vulkan backend are packaged and extractable."
 
-      - name: Prepare Standalone APK Artifact
+      - name: Prepare Debug Harness APK Artifact
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/LLM-Lab-Standalone-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/LLM-Engine-Debug.apk
 
-      - name: Upload Standalone Debug APK
+      - name: Upload LLM Engine Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: LLM-Lab-Standalone-Debug-APK
-          path: dist/LLM-Lab-Standalone-debug.apk
+          name: LLM-Engine-Debug-Harness
+          path: dist/LLM-Engine-Debug.apk
           retention-days: 30
           if-no-files-found: error

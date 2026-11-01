@@ -12,8 +12,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.outlined.Chat
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material.icons.outlined.*
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -28,47 +30,47 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.LLMLabViewModel
 import com.example.ui.ModelLifecycleState
-import com.example.ui.screens.*
+import com.example.ui.screens.ChatScreen
+import com.example.ui.screens.DeveloperToolsScreen
+import com.example.ui.screens.ModelScreen
+import com.example.ui.screens.SettingsScreen
 import com.example.ui.theme.*
 
-data class NavTabItem(
-    val title: String,
-    val selectedIcon: ImageVector,
-    val unselectedIcon: ImageVector,
-    val tag: String
-)
+private data class NavTabItem(val title: String, val selectedIcon: ImageVector, val unselectedIcon: ImageVector, val tag: String)
 
 class MainActivity : ComponentActivity() {
-
     private val viewModel: LLMLabViewModel by viewModels()
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
         setContent {
             LLMLabTheme {
                 val currentTab by viewModel.currentTab.collectAsState()
                 val modelState by viewModel.modelState.collectAsState()
+                var developerMenuExpanded by remember { mutableStateOf(false) }
 
-                BackHandler(enabled = currentTab != 0) {
-                    viewModel.selectTab(0)
+                BackHandler(enabled = currentTab >= 2) {
+                    viewModel.selectTab(if (currentTab == 3) 2 else 0)
                 }
 
-                val navItems = listOf(
+                val coreNavigation = listOf(
                     NavTabItem("Modell", Icons.Filled.Layers, Icons.Outlined.Layers, "nav_model"),
-                    NavTabItem("Chat", Icons.AutoMirrored.Filled.Chat, Icons.AutoMirrored.Outlined.Chat, "nav_chat"),
-                    NavTabItem("Labor", Icons.Filled.Science, Icons.Outlined.Science, "nav_lab"),
-                    NavTabItem("Bench", Icons.Filled.Speed, Icons.Outlined.Speed, "nav_bench"),
-                    NavTabItem("Diagnose", Icons.Filled.Analytics, Icons.Outlined.Analytics, "nav_diagnose"),
-                    NavTabItem("Config", Icons.Filled.Settings, Icons.Outlined.Settings, "nav_settings")
+                    NavTabItem("Inferenz", Icons.AutoMirrored.Filled.Chat, Icons.AutoMirrored.Outlined.Chat, "nav_inference")
                 )
 
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
                     topBar = {
                         TopAppBar(
+                            navigationIcon = {
+                                if (currentTab >= 2) {
+                                    IconButton(onClick = { viewModel.selectTab(if (currentTab == 3) 2 else 0) }) {
+                                        Icon(Icons.Filled.ArrowBack, contentDescription = "Zurück", tint = NeonCyan)
+                                    }
+                                }
+                            },
                             title = {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
@@ -77,19 +79,25 @@ class MainActivity : ComponentActivity() {
                                 ) {
                                     Column {
                                         Text(
-                                            text = "LLM Lab",
+                                            text = when (currentTab) {
+                                                2 -> "Entwicklung & Qualität"
+                                                3 -> "Engine-Einstellungen"
+                                                else -> "LLM Engine"
+                                            },
                                             color = NeonCyan,
                                             fontWeight = FontWeight.Bold,
                                             fontSize = 18.sp
                                         )
                                         Text(
-                                            text = "Mobile Inference Testbench",
+                                            text = when (currentTab) {
+                                                2 -> "Zentrale Tests und Messwerte"
+                                                3 -> "Interne Laufzeitparameter"
+                                                else -> "Lokale Modell-Inferenz"
+                                            },
                                             color = TextSecondary,
                                             fontSize = 11.sp
                                         )
                                     }
-
-                                    // Status Badge oben rechts
                                     Surface(
                                         color = DarkSurfaceVariant,
                                         shape = RoundedCornerShape(12.dp),
@@ -101,25 +109,22 @@ class MainActivity : ComponentActivity() {
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             Box(
-                                                modifier = Modifier
-                                                    .size(8.dp)
-                                                    .clip(RoundedCornerShape(4.dp))
-                                                    .background(
-                                                        when (modelState) {
-                                                            is ModelLifecycleState.Ready -> MatrixGreen
-                                                            is ModelLifecycleState.InferenceRunning -> NeonCyan
-                                                            is ModelLifecycleState.Initializing -> ElectricAmber
-                                                            is ModelLifecycleState.Error -> LaserCrimson
-                                                            else -> TextMuted
-                                                        }
-                                                    )
+                                                modifier = Modifier.size(8.dp).clip(RoundedCornerShape(4.dp)).background(
+                                                    when (modelState) {
+                                                        is ModelLifecycleState.Ready -> MatrixGreen
+                                                        is ModelLifecycleState.InferenceRunning -> NeonCyan
+                                                        is ModelLifecycleState.Initializing -> ElectricAmber
+                                                        is ModelLifecycleState.Error -> LaserCrimson
+                                                        else -> TextMuted
+                                                    }
+                                                )
                                             )
                                             Spacer(modifier = Modifier.width(6.dp))
                                             Text(
                                                 text = when (modelState) {
-                                                    is ModelLifecycleState.Ready -> "Modell bereit"
+                                                    is ModelLifecycleState.Ready -> "Bereit"
                                                     is ModelLifecycleState.InferenceRunning -> "Inferenz"
-                                                    is ModelLifecycleState.Initializing -> "Lade..."
+                                                    is ModelLifecycleState.Initializing -> "Lädt…"
                                                     is ModelLifecycleState.Error -> "Fehler"
                                                     else -> "Offline"
                                                 },
@@ -132,63 +137,72 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             },
-                            colors = TopAppBarDefaults.topAppBarColors(
-                                containerColor = DarkSurface,
-                                titleContentColor = TextPrimary
-                            )
+                            actions = {
+                                if (BuildConfig.DEBUG && currentTab < 2) {
+                                    Box {
+                                        IconButton(onClick = { developerMenuExpanded = true }) {
+                                            Icon(Icons.Filled.MoreVert, contentDescription = "Entwicklermenü", tint = TextSecondary)
+                                        }
+                                        DropdownMenu(
+                                            expanded = developerMenuExpanded,
+                                            onDismissRequest = { developerMenuExpanded = false }
+                                        ) {
+                                            DropdownMenuItem(
+                                                text = { Text("Entwicklung & Diagnose") },
+                                                onClick = {
+                                                    developerMenuExpanded = false
+                                                    viewModel.selectTab(2)
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            },
+                            colors = TopAppBarDefaults.topAppBarColors(containerColor = DarkSurface, titleContentColor = TextPrimary)
                         )
                     },
                     bottomBar = {
-                        NavigationBar(
-                            containerColor = DarkSurface,
-                            tonalElevation = 8.dp,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .windowInsetsPadding(WindowInsets.navigationBars)
-                        ) {
-                            navItems.forEachIndexed { index, item ->
-                                val isSelected = currentTab == index
-                                NavigationBarItem(
-                                    selected = isSelected,
-                                    onClick = { viewModel.selectTab(index) },
-                                    icon = {
-                                        Icon(
-                                            imageVector = if (isSelected) item.selectedIcon else item.unselectedIcon,
-                                            contentDescription = item.title,
-                                            tint = if (isSelected) NeonCyan else TextSecondary
-                                        )
-                                    },
-                                    label = {
-                                        Text(
-                                            text = item.title,
-                                            fontSize = 10.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                            color = if (isSelected) NeonCyan else TextSecondary
-                                        )
-                                    },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = NeonCyan,
-                                        selectedTextColor = NeonCyan,
-                                        indicatorColor = DarkSurfaceVariant
-                                    ),
-                                    modifier = Modifier.testTag(item.tag)
-                                )
+                        if (currentTab in 0..1) {
+                            NavigationBar(
+                                containerColor = DarkSurface,
+                                tonalElevation = 8.dp,
+                                modifier = Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars)
+                            ) {
+                                coreNavigation.forEachIndexed { index, item ->
+                                    val selected = currentTab == index
+                                    NavigationBarItem(
+                                        selected = selected,
+                                        onClick = { viewModel.selectTab(index) },
+                                        icon = {
+                                            Icon(
+                                                imageVector = if (selected) item.selectedIcon else item.unselectedIcon,
+                                                contentDescription = item.title,
+                                                tint = if (selected) NeonCyan else TextSecondary
+                                            )
+                                        },
+                                        label = {
+                                            Text(item.title, fontSize = 10.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                                color = if (selected) NeonCyan else TextSecondary)
+                                        },
+                                        colors = NavigationBarItemDefaults.colors(
+                                            selectedIconColor = NeonCyan,
+                                            selectedTextColor = NeonCyan,
+                                            indicatorColor = DarkSurfaceVariant
+                                        ),
+                                        modifier = Modifier.testTag(item.tag)
+                                    )
+                                }
                             }
                         }
                     }
                 ) { innerPadding ->
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(innerPadding)
-                    ) {
+                    Box(Modifier.fillMaxSize().padding(innerPadding)) {
                         when (currentTab) {
-                            0 -> ModelScreen(viewModel = viewModel)
-                            1 -> ChatScreen(viewModel = viewModel)
-                            2 -> PromptLabScreen(viewModel = viewModel)
-                            3 -> BenchmarkScreen(viewModel = viewModel)
-                            4 -> DiagnoseScreen(viewModel = viewModel)
-                            5 -> SettingsScreen(viewModel = viewModel)
+                            0 -> ModelScreen(viewModel)
+                            1 -> ChatScreen(viewModel)
+                            2 -> DeveloperToolsScreen(viewModel) { viewModel.selectTab(3) }
+                            3 -> SettingsScreen(viewModel)
+                            else -> ModelScreen(viewModel)
                         }
                     }
                 }

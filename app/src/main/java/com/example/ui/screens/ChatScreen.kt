@@ -17,7 +17,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -299,60 +298,7 @@ fun ChatMessageItem(message: ChatMessage) {
                     lineHeight = 20.sp
                 )
 
-                // Echte native Metriken anzeigen
-                message.metrics?.let { m ->
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider(color = DarkCardBorder, thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(6.dp))
 
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = "Prompt: ${m.promptTokens} Tok (${m.promptEvalDurationMs}ms)",
-                                color = TextSecondary,
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
-                            Text(
-                                text = "${"%.1f".format(m.tokensPerSecond)} Tok/s",
-                                color = NeonCyan,
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = "Generiert: ${m.generatedTokens} Tok (${m.generationDurationMs}ms)",
-                                color = TextSecondary,
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
-                            Text(
-                                text = "Gesamt: ${m.totalDurationMs}ms",
-                                color = TextSecondary,
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
-                        }
-
-                        if (m.finishReason.isNotEmpty()) {
-                            Text(
-                                text = "Status: ${m.finishReason}",
-                                color = if (m.finishReason == "STOP_TOKEN" || m.finishReason == "MAX_TOKENS") MatrixGreen else LaserCrimson,
-                                fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
-                        }
-                    }
-                }
             }
         }
     }

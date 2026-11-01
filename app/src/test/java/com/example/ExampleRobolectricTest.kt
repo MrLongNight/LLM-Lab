@@ -68,7 +68,7 @@ class ExampleRobolectricTest {
     fun `read string from context`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val appName = context.getString(R.string.app_name)
-        assertEquals("LLM Lab (Standalone)", appName)
+        assertEquals("LLM Engine – Entwicklungsprototyp", appName)
     }
 
     @Test
@@ -195,17 +195,22 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `verify PromptLab and Diagnose provide bounded scroll lists`() {
-        val promptScreen = java.io.File("src/main/java/com/example/ui/screens/PromptLabScreen.kt").readText()
-        val diagnoseScreen = java.io.File("src/main/java/com/example/ui/screens/DiagnoseScreen.kt").readText()
+    fun `verify development tests and all measurements are centralized`() {
+        val mainActivity = java.io.File("src/main/java/com/example/MainActivity.kt").readText()
+        val developerScreen = java.io.File("src/main/java/com/example/ui/screens/DeveloperToolsScreen.kt").readText()
+        val chatScreen = java.io.File("src/main/java/com/example/ui/screens/ChatScreen.kt").readText()
 
-        assertTrue(promptScreen.contains(".weight(1f)"))
-        assertTrue(promptScreen.contains("testTag(\"prompt_test_list\")"))
-        assertTrue(promptScreen.contains(".heightIn(max = 120.dp)"))
-        assertTrue(diagnoseScreen.contains(".weight(1f)"))
-        assertTrue(diagnoseScreen.contains("testTag(\"diagnose_history_list\")"))
+        assertTrue(mainActivity.contains("NavTabItem(\"Modell\""))
+        assertTrue(mainActivity.contains("NavTabItem(\"Inferenz\""))
+        assertFalse(mainActivity.contains("NavTabItem(\"Labor\""))
+        assertTrue(mainActivity.contains("BuildConfig.DEBUG"))
+        assertTrue(developerScreen.contains("viewModel.runQwenQuickCheck()"))
+        assertTrue(developerScreen.contains("viewModel.runQwenQuickThenFull()"))
+        assertTrue(developerScreen.contains("viewModel.run3xBenchmark()"))
+        assertTrue(developerScreen.contains("testRunHistory"))
+        assertTrue(developerScreen.contains("developer_history_list"))
+        assertFalse(chatScreen.contains("message.metrics"))
     }
-
     @Test
     fun `verify MainActivity onCreate launches cleanly`() {
         val scenario = ActivityScenario.launch(MainActivity::class.java)
