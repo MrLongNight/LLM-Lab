@@ -474,10 +474,12 @@ class LLMLabViewModel @JvmOverloads constructor(
         val file = findLocalHuggingFaceModel(model)
         if (file == null) {
             refreshDownloadedModels()
-            _huggingFaceDownload.value = HuggingFaceDownloadUiState(
-                modelId = modelId,
-                error = "In den lokalen App-Speichern wurde keine vollständige Datei gefunden. Es wird nichts gelöscht; bitte erst Speicher prüfen, bevor du erneut herunterlädst."
-            )
+            _huggingFaceDownloads.update { current ->
+                current + (modelId to HuggingFaceDownloadUiState(
+                    modelId = modelId,
+                    error = "In den lokalen App-Speichern wurde keine vollständige Datei gefunden. Es wird nichts gelöscht; bitte erst Speicher prüfen, bevor du erneut herunterlädst."
+                ))
+            }
             return
         }
         onModelFileSelected(Uri.fromFile(file))
