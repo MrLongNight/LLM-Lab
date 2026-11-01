@@ -31,12 +31,11 @@ Die GitHub-Actions-Pipeline führt dieselben beiden Gradle-Aufgaben aus und ver�
 ## Installation und erster Modelltest
 
 1. Die APK `LLM-Lab-Standalone-debug.apk` aus dem Actions-Artefakt herunterladen und auf dem Android-Zielgerät installieren.
-2. Die Datei `qwen2.5-1.5b-instruct-q4_k_m.gguf` (ca. 1,12 GB) lokal auf dem Gerät verfügbar machen.
-3. In LLM Lab den Bereich **Modell** öffnen und die GGUF-Datei über den System-Dateiauswahldialog auswählen.
-4. Die angezeigte Datei-/GGUF-Information prüfen und **Initialisieren** starten.
-5. Erst bei Status **Modell bereit** den Kurztest im Prompt-Labor ausführen.
-6. In der Modellverwaltung eines der vier Qwen-GGUF-Modelle herunterladen oder auswählen. Der Download kann fortgesetzt werden und wird vor der Verwendung per GGUF-Header und SHA-256 geprüft. **Quick-Check** schaltet alle vier Modelle einzeln durch. **Quick → Full** startet die vollständige Matrix nur, wenn jeder Quick-Check bestanden wurde. Im Prompt-Labor stehen sieben Einzelworkflows für Durchsatz, DMS, JSON-Extraktion, Vulkan-Hardware-Tuning, Sampling und zwei Prompt-Prefill-Längen bereit.
-7. Bei Fehlern TXT- und JSON-Diagnoseexport erzeugen. Chat-Prompt und Chat-Antwort werden in der lokalen Testhistorie redigiert gespeichert.
+2. Im Bereich **Modell** eines der vier Qwen-GGUF-Modelle direkt herunterladen. Alternativ kannst du unter **Eigenes GGUF-Modell importieren** eine eigene Datei auswählen. Hugging-Face-Downloads werden fortgesetzt und vor der Verwendung per GGUF-Header und SHA-256 geprüft.
+3. Nach erfolgreicher Prüfung wird das ausgewählte Modell zur Initialisierung angeboten. **Modell jetzt initialisieren** startet das native Laden; erst danach erscheint der Status **Modell einsatzbereit**.
+4. Im **Prompt-Testlabor** die automatische Qwen-Matrix starten: **Quick-Pretest** prüft alle vier Modelle einzeln. **Quick → Full** startet die vollständigen 80 Einzelprofile nur dann, wenn alle vier Quick-Checks bestanden wurden.
+5. Im Prompt-Testlabor können außerdem die sieben Einzelworkflows für Durchsatz, DMS, JSON-Extraktion, Vulkan-Hardware-Tuning, Sampling und zwei reproduzierbare Prompt-Prefill-Längen separat ausgeführt werden.
+6. Bei Fehlern TXT- und JSON-Diagnoseexport erzeugen. Chat-Prompt und Chat-Antwort werden in der lokalen Testhistorie redigiert gespeichert.
 
 ## Inferenzmesswerte
 
