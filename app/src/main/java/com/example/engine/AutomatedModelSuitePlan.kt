@@ -44,7 +44,7 @@ object AutomatedModelSuitePlan {
             id = "json-strict",
             title = "JSON Strict",
             description = "Prüft strikt formatiertes JSON einschließlich null für nicht vorhandene Felder.",
-            prompt = "Gib ausschließlich ein valides JSON-Objekt mit exakt den Feldern sender, totalAmount und iban aus. Extrahiere sender und totalAmount aus dem Dokument. Setze iban auf JSON-null, falls keine IBAN vorhanden ist. Dokument:\\n$quickPrompt",
+            prompt = "Gib ausschließlich ein valides JSON-Objekt mit exakt den Feldern sender, totalAmount und iban aus. Extrahiere sender und totalAmount aus dem Dokument. Setze iban auf JSON-null, falls keine IBAN vorhanden ist. Dokument:\\n$sampleLetterText",
             expectedKeywords = listOf("sender", "totalAmount", "iban"),
             maxTokens = 96,
             timeoutSec = 120,
