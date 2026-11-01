@@ -16,6 +16,9 @@ import com.example.engine.GgufMetadataParser
 import com.example.engine.HuggingFaceModelCatalog
 import com.example.engine.HuggingFaceModelDownloader
 import com.example.engine.AutomatedModelSuitePlan
+import com.example.engine.AutomatedModelSuiteCoordinator
+import com.example.engine.AutomatedModelSuiteProgress
+import com.example.engine.AutomatedWorkflowResult
 import com.example.engine.BackendPreference
 import com.example.engine.NativeBackendInfo
 import com.example.engine.InferenceCallback
@@ -137,6 +140,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
     private val dao = db.testRunDao()
     private val nativeBridge = LlamaNativeBridge(application.applicationInfo.nativeLibraryDir)
     private val huggingFaceDownloader = HuggingFaceModelDownloader(application)
+    private val automatedSuiteCoordinator = AutomatedModelSuiteCoordinator()
     private val _downloadedModelIds = MutableStateFlow<Set<String>>(emptySet())
     val downloadedModelIds: StateFlow<Set<String>> = _downloadedModelIds.asStateFlow()
     private val _huggingFaceDownload = MutableStateFlow(HuggingFaceDownloadUiState())
@@ -1429,6 +1433,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun runQwenModelSuite(runFullAfterQuickCheck: Boolean) {
         if (_automatedSuite.value.isRunning || huggingFaceDownloadJob?.isActive == true) return
+
         val previousReady = _modelState.value as? ModelLifecycleState.Ready
         val previousSelection = lastModelSelection
         val previousFile = activeModelFile
@@ -1450,16 +1455,11 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
         automatedSuiteAbortRequested.set(false)
         launchEngineOperation {
             val models = HuggingFaceModelCatalog.models
-            var quickPassed = 0
-            var quickFailed = 0
-            var fullTestsFailed = 0
-            val summaries = mutableListOf<String>()
-            val fullCases = AutomatedModelSuitePlan.fullRoutine()
             _automatedSuite.value = AutomatedModelSuiteUiState(
                 isRunning = true,
                 phase = "DOWNLOAD",
                 modelCount = models.size,
-                message = "Lade/prüfe nacheinander alle vier Qwen-GGUF-Dateien."
+                message = "Automatische Qwen-Testreihe wird vorbereitet."
             )
             _labTestOutput.value = "Automatische Qwen-Testreihe gestartet."
             _config.value = suiteConfig
@@ -1468,6 +1468,7 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 if (!modelDirectory.exists() && !modelDirectory.mkdirs()) {
                     throw IOException("Der interne Modellordner konnte nicht angelegt werden.")
                 }
+
                 val remainingModelBytes = models.sumOf { model ->
                     val complete = File(modelDirectory, model.filename)
                     val partial = File(modelDirectory, "${model.filename}.part")
@@ -1481,173 +1482,81 @@ class LLMLabViewModel(application: Application) : AndroidViewModel(application) 
                 val availableBytes = android.os.StatFs(modelDirectory.absolutePath).availableBytes
                 if (availableBytes < remainingModelBytes + storageReserveBytes) {
                     throw IOException(
-                        "Für alle vier Qwen-Modelle fehlen ungefähr ${(remainingModelBytes + storageReserveBytes - availableBytes) / (1024L * 1024L)} MB Speicher. Benötigt werden rund 3,1 GB für die Modelle plus Reserve."
+                        "Für alle vier Qwen-Modelle fehlen ungefähr " +
+                            "${(remainingModelBytes + storageReserveBytes - availableBytes) / (1024L * 1024L)} MB Speicher. " +
+                            "Benötigt werden rund 3,1 GB für die Modelle plus Reserve."
                     )
                 }
 
-                // Download all required artifacts first. The downloader resumes partial transfers.
-                for ((index, model) in models.withIndex()) {
-                    if (nativeEngineUnresponsive.get() || automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()) {
-                        throw InterruptedIOException("Die Testreihe wurde abgebrochen.")
-                    }
-                    _automatedSuite.value = _automatedSuite.value.copy(
-                        phase = "DOWNLOAD",
-                        currentModelIndex = index + 1,
-                        currentModelName = "${model.title} · ${model.parameters} · ${model.quantization}",
-                        message = "Download ${index + 1}/${models.size}: ${model.filename}"
-                    )
-                    val file = huggingFaceDownloader.download(model) { downloaded, total ->
-                        if (automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()) {
-                            throw CancellationException("Automatische Testreihe wurde während des Downloads abgebrochen.")
+                automatedSuiteCoordinator.execute(
+                    models = models,
+                    modelDirectory = modelDirectory,
+                    config = suiteConfig,
+                    fullRoutine = AutomatedModelSuitePlan.fullRoutine(),
+                    runFullAfterQuickCheck = runFullAfterQuickCheck,
+                    isAborted = {
+                        automatedSuiteAbortRequested.get() ||
+                            nativeBridge.isAbortRequested() ||
+                            nativeEngineUnresponsive.get()
+                    },
+                    onProgress = { progress: AutomatedModelSuiteProgress ->
+                        _automatedSuite.value = AutomatedModelSuiteUiState(
+                            isRunning = progress.isRunning,
+                            phase = progress.phase,
+                            currentModelIndex = progress.currentModelIndex,
+                            modelCount = progress.modelCount,
+                            currentModelName = progress.currentModelName,
+                            quickPassed = progress.quickPassed,
+                            quickFailed = progress.quickFailed,
+                            fullTestsCompleted = progress.fullTestsCompleted,
+                            fullTestsTotal = progress.fullTestsTotal,
+                            message = progress.message,
+                            error = progress.error
+                        )
+                    },
+                    onOutput = { output -> _labTestOutput.value = output },
+                    downloadModel = { model, index, count ->
+                        val file = huggingFaceDownloader.download(model) { downloaded, total ->
+                            if (automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()) {
+                                throw CancellationException("Automatische Testreihe wurde während des Downloads abgebrochen.")
+                            }
+                            _huggingFaceDownload.value = HuggingFaceDownloadUiState(
+                                modelId = model.id,
+                                downloadedBytes = downloaded,
+                                totalBytes = total,
+                                isDownloading = true,
+                                message = "Automatischer Download $index/$count"
+                            )
                         }
+                        _downloadedModelIds.value = _downloadedModelIds.value + model.id
                         _huggingFaceDownload.value = HuggingFaceDownloadUiState(
                             modelId = model.id,
-                            downloadedBytes = downloaded,
-                            totalBytes = total,
-                            isDownloading = true,
-                            message = "Automatischer Download ${index + 1}/${models.size}"
+                            downloadedBytes = file.length(),
+                            totalBytes = file.length(),
+                            isDownloading = false,
+                            message = "Download und SHA-256-Prüfung erfolgreich."
                         )
-                    }
-                    _downloadedModelIds.value = _downloadedModelIds.value + model.id
-                }
-                _huggingFaceDownload.value = _huggingFaceDownload.value.copy(
-                    isDownloading = false,
-                    message = "Alle vier Qwen-Modelle wurden heruntergeladen und geprüft."
-                )
-
-                _automatedSuite.value = _automatedSuite.value.copy(
-                    phase = "QUICK_CHECK",
-                    message = "Alle vier Dateien sind geprüft. Starte Quick-Preflight für jedes Modell."
-                )
-                // No full run is allowed until every single model passed this stage.
-                for ((index, model) in models.withIndex()) {
-                    if (nativeEngineUnresponsive.get() || automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()) {
-                        throw InterruptedIOException("Quick-Check durch Nutzer oder native Engine abgebrochen.")
-                    }
-                    val file = File(File(getApplication<Application>().filesDir, "models"), model.filename)
-                    _automatedSuite.value = _automatedSuite.value.copy(
-                        phase = "MODEL_SWITCH",
-                        currentModelIndex = index + 1,
-                        currentModelName = "${model.title} · ${model.parameters} · ${model.quantization}",
-                        message = "Vorheriges Modell entladen; ${model.filename} wird geladen."
-                    )
-                    val ready = loadModelForAutomatedSuite(file, suiteConfig)
-                    if (ready == null) {
-                        quickFailed++
-                        summaries += "Quick-Check ${index + 1}/${models.size} – ${model.filename}: MODELLLADEN FEHLGESCHLAGEN"
-                        break
-                    }
-                    if (runQuickModelCheck(model, ready, suiteConfig, index + 1, models.size)) {
-                        quickPassed++
-                        summaries += "Quick-Check ${index + 1}/${models.size} – ${model.filename}: BESTANDEN"
-                    } else {
-                        quickFailed++
-                        summaries += "Quick-Check ${index + 1}/${models.size} – ${model.filename}: FEHLGESCHLAGEN"
-                        break
-                    }
-                }
-
-                if (quickFailed > 0 || quickPassed != models.size) {
-                    val quickWasAborted = automatedSuiteAbortRequested.get() ||
-                        nativeBridge.isAbortRequested() || nativeEngineUnresponsive.get()
-                    _automatedSuite.value = _automatedSuite.value.copy(
-                        phase = if (quickWasAborted) "ABORTED" else "QUICK_FAILED",
-                        isRunning = false,
-                        quickPassed = quickPassed,
-                        quickFailed = quickFailed,
-                        message = if (quickWasAborted) {
-                            "Quick-Preflight wurde abgebrochen. Die Full-Routine wurde NICHT gestartet."
-                        } else {
-                            "Quick-Preflight nicht vollständig bestanden. Full-Routine wurde NICHT gestartet."
-                        },
-                        error = if (quickWasAborted) null else {
-                            "Mindestens ein Modell scheiterte beim Laden, Vulkan-Offload oder Quick-Inferenztest."
-                        }
-                    )
-                    _labTestOutput.value = summaries.joinToString("\n") +
-                        if (quickWasAborted) {
-                            "\n\nABGEBROCHEN: Full-Routine wurde nicht gestartet."
-                        } else {
-                            "\n\nFULL-TEST ÜBERSPRUNGEN: Quick-Check-Fehler zuerst beheben."
-                        }
-                    return@launchEngineOperation
-                }
-
-                if (!runFullAfterQuickCheck) {
-                    _automatedSuite.value = _automatedSuite.value.copy(
-                        phase = "QUICK_PASSED",
-                        isRunning = false,
-                        quickPassed = quickPassed,
-                        quickFailed = 0,
-                        message = "Quick-Preflight für alle vier Modelle bestanden. Full-Routine freigegeben."
-                    )
-                    _labTestOutput.value = summaries.joinToString("\n") +
-                        "\n\nAlle vier Modelle haben den Quick-Preflight bestanden."
-                    return@launchEngineOperation
-                }
-
-                val fullTestsTotal = models.size * fullCases.sumOf { case ->
-                    AutomatedModelSuitePlan.variantsFor(case).size
-                }
-                var fullTestsCompleted = 0
-                _automatedSuite.value = _automatedSuite.value.copy(
-                    phase = "FULL_TEST",
-                    isRunning = true,
-                    quickPassed = quickPassed,
-                    quickFailed = 0,
-                    fullTestsCompleted = 0,
-                    fullTestsTotal = fullTestsTotal,
-                    message = "Quick-Preflight fehlerfrei. Starte die vollständige siebenstufige Vergleichsmatrix."
-                )
-
-                for ((modelIndex, model) in models.withIndex()) {
-                    if (nativeEngineUnresponsive.get() || automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()) break
-                    val file = File(File(getApplication<Application>().filesDir, "models"), model.filename)
-                    val ready = loadModelForAutomatedSuite(file, suiteConfig)
-                    if (ready == null) {
-                        fullTestsFailed++
-                        summaries += "Full-Test: ${model.filename} konnte nicht geladen werden."
-                        break
-                    }
-                    for (testCase in fullCases) {
-                        if (nativeEngineUnresponsive.get() || automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()) break
-                        _automatedSuite.value = _automatedSuite.value.copy(
-                            phase = "FULL_TEST",
-                            currentModelIndex = modelIndex + 1,
-                            currentModelName = model.filename,
-                            fullTestsCompleted = fullTestsCompleted,
-                            message = "Full-Test: Modell ${modelIndex + 1}/${models.size} · ${testCase.title}"
-                        )
+                    },
+                    loadModel = { file, config -> loadModelForAutomatedSuite(file, config) },
+                    quickCheck = { model, ready, index, count ->
+                        runQuickModelCheck(model, ready, suiteConfig, index, count)
+                    },
+                    runWorkflow = { testCase, ready, config ->
                         val runsBefore = dao.getCount()
-                        val success = runLabTestInternal(testCase, ready, suiteConfig)
+                        val succeeded = runLabTestInternal(testCase, ready, config)
                         val actualRuns = (dao.getCount() - runsBefore).coerceAtLeast(0)
-                        fullTestsCompleted += actualRuns
-                        if (!success) fullTestsFailed++
-                        summaries += "${model.filename} · ${testCase.title}: ${if (success) "BESTANDEN" else "MIT FEHLERN"}"
+                        AutomatedWorkflowResult(actualRuns = actualRuns, succeeded = succeeded)
                     }
-                    if (nativeEngineUnresponsive.get() || automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()) break
-                }
-
-                val aborted = automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested() || nativeEngineUnresponsive.get()
-                _automatedSuite.value = _automatedSuite.value.copy(
-                    phase = if (aborted) "ABORTED" else if (fullTestsFailed == 0) "FULL_PASSED" else "FULL_COMPLETED_WITH_FAILURES",
-                    isRunning = false,
-                    quickPassed = quickPassed,
-                    quickFailed = 0,
-                    fullTestsCompleted = fullTestsCompleted,
-                    fullTestsTotal = fullTestsTotal,
-                    message = if (aborted) "Full-Routine abgebrochen." else "Full-Routine beendet: $fullTestsCompleted/$fullTestsTotal Einzelprofile; $fullTestsFailed Workflows mit Fehlern."
                 )
-                _labTestOutput.value = summaries.joinToString("\n")
             } catch (error: Throwable) {
-                val aborted = error is CancellationException || automatedSuiteAbortRequested.get() || nativeBridge.isAbortRequested()
+                val aborted = error is CancellationException ||
+                    automatedSuiteAbortRequested.get() ||
+                    nativeBridge.isAbortRequested()
                 _automatedSuite.value = _automatedSuite.value.copy(
                     phase = if (aborted) "ABORTED" else "ERROR",
                     isRunning = false,
-                    quickPassed = quickPassed,
-                    quickFailed = quickFailed,
                     message = if (aborted) "Automatische Qwen-Testreihe abgebrochen." else "Automatische Qwen-Testreihe fehlgeschlagen.",
-                    error = error.message ?: error.javaClass.simpleName
+                    error = if (aborted) null else error.message ?: error.javaClass.simpleName
                 )
                 _labTestOutput.value = "Automatische Qwen-Testreihe fehlgeschlagen: ${error.message}"
             } finally {
