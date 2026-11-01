@@ -1504,6 +1504,15 @@ class LLMLabViewModel @JvmOverloads constructor(
 
     private fun runQwenModelSuite(request: com.example.engine.SuiteRequest) {
         if (_automatedSuite.value.isRunning || huggingFaceDownloadJob?.isActive == true) return
+        if (nativeEngineUnresponsive.get()) {
+            _automatedSuite.value = _automatedSuite.value.copy(
+                isRunning = false,
+                phase = "ERROR",
+                message = "Suite kann nicht starten.",
+                error = "Die native Engine reagiert nicht mehr. Bitte LLM Lab neu starten."
+            )
+            return
+        }
 
         val previousReady = _modelState.value as? ModelLifecycleState.Ready
         val previousSelection = lastModelSelection
