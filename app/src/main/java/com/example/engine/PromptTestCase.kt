@@ -53,7 +53,6 @@ object PromptTestCatalog {
         Fällig bis: 31.03.2026
     """.trimIndent()
 
-    /** Sampling stays fixed so performance differences mainly reflect backend/batch/thread settings. */
     /** One CPU reference and one Vulkan profile; no redundant CPU wide-batch sweep. */
     val PARAMETER_VARIANTS: List<InferenceTestVariant> = listOf(
         InferenceTestVariant(
@@ -76,10 +75,6 @@ object PromptTestCatalog {
         )
     )
 
-    /**
-     * Short hardware sweep. Each configuration keeps sampling fixed.
-     * The target phone has eight logical CPU cores.
-     */
     /** Thread/ubatch tuning while Vulkan remains mandatory for every run. */
     val TUNING_VARIANTS: List<InferenceTestVariant> = listOf(
         InferenceTestVariant("VK_GEN_2_8", "Vulkan · 2/8 Threads · ubatch 64", 512, 64, 2, 8, BackendPreference.ACCELERATOR_REQUIRED),
@@ -166,7 +161,7 @@ object PromptTestCatalog {
         ),
         PromptTestCase(
             id = "TEST_PREFILL_256",
-            title = "6. Mittlerer Prompt-Prefill (~256 Tokens)",
+            title = "6. Mittlerer Prompt-Prefill",
             description = "Misst die Verarbeitung eines mittellangen, wiederholbaren OCR-Belegtexts mit drei Vulkan-ubatch-Profilen.",
             prompt = "Lies den folgenden Belegtext vollständig. Antworte danach ausschließlich mit dem Wort OCR. Belegtext:\n$prefill256Text",
             expectedKeywords = listOf("OCR"),
@@ -175,7 +170,7 @@ object PromptTestCatalog {
         ),
         PromptTestCase(
             id = "TEST_PREFILL_512",
-            title = "7. Langer Prompt-Prefill (~512 Tokens)",
+            title = "7. Langer Prompt-Prefill",
             description = "Misst die Verarbeitung eines längeren OCR-Belegtexts mit denselben drei Vulkan-ubatch-Profilen.",
             prompt = "Lies den folgenden Belegtext vollständig. Antworte danach ausschließlich mit dem Wort OCR. Belegtext:\n$prefill512Text",
             expectedKeywords = listOf("OCR"),
