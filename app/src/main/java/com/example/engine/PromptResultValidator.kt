@@ -35,7 +35,11 @@ object PromptResultValidator {
                 )
             }
             "json-strict" -> {
-                val json = parseJson(output)
+                val json = if (output.startsWith("{") && output.endsWith("}")) {
+                    runCatching { JSONObject(output) }.getOrNull()
+                } else {
+                    null
+                }
                 if (json == null) {
                     PromptValidationResult(false, "Erwartet wird valides JSON ohne Markdown oder zusätzlichen Fließtext.")
                 } else {

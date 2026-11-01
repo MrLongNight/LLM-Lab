@@ -81,10 +81,14 @@ class PromptResultValidatorTest {
         val wrongAmount = """{"sender":"Praxis Dr. med. Martin Müller","totalAmount":149.00,"iban":null}"""
         val extraField = """{"sender":"Praxis Dr. med. Martin Müller","totalAmount":149.50,"iban":null,"date":null}"""
         val fabricatedIban = """{"sender":"Praxis Dr. med. Martin Müller","totalAmount":149.50,"iban":"DE123"}"""
+        val markdownFence = """```json
+{"sender":"Praxis Dr. med. Martin Müller","totalAmount":149.50,"iban":null}
+```"""
         assertTrue(PromptResultValidator.validate(testCase, good).passed)
         assertFalse(PromptResultValidator.validate(testCase, wrongAmount).passed)
         assertFalse(PromptResultValidator.validate(testCase, extraField).passed)
         assertFalse(PromptResultValidator.validate(testCase, fabricatedIban).passed)
+        assertFalse(PromptResultValidator.validate(testCase, markdownFence).passed)
     }
 
     @Test

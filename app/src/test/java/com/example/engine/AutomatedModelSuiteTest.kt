@@ -4,6 +4,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlinx.coroutines.delay
+import java.util.concurrent.atomic.AtomicInteger
 
 class AutomatedModelSuiteTest {
     @Test
@@ -128,6 +130,52 @@ class AutomatedModelSuiteTest {
         org.junit.Assert.assertEquals("FULL_PASSED", finalProgress.phase)
         org.junit.Assert.assertEquals(2, finalProgress.fullTestsCompleted)
         org.junit.Assert.assertEquals(2, finalProgress.fullTestsTotal)
+    }
+
+    @Test
+    fun quickModeRunsAtMostTwoDownloadsConcurrentlyButKeepsInferenceSerial() = kotlinx.coroutines.test.runTest {
+        val coordinator = AutomatedModelSuiteCoordinator()
+        val models = HuggingFaceModelCatalog.models
+        val activeDownloads = AtomicInteger()
+        val peakDownloads = AtomicInteger()
+        val activeWorkflows = AtomicInteger()
+        val peakWorkflows = AtomicInteger()
+
+        fun recordPeak(peak: AtomicInteger, active: Int) {
+            while (true) {
+                val current = peak.get()
+                if (active <= current || peak.compareAndSet(current, active)) return
+            }
+        }
+
+        coordinator.run(
+            request = coordinator.runQuick(),
+            models = models,
+            modelDirectory = java.io.File("unused-model-directory"),
+            config = InferenceConfig.fromPreset(ProfilePreset.BALANCED),
+            fullRoutine = AutomatedModelSuitePlan.fullRoutine(),
+            isAborted = { false },
+            onProgress = {},
+            onOutput = {},
+            downloadModel = { _, _, _ ->
+                val active = activeDownloads.incrementAndGet()
+                recordPeak(peakDownloads, active)
+                delay(10)
+                activeDownloads.decrementAndGet()
+            },
+            loadModel = { file, _, _ -> file.name },
+            quickCheck = { _, _, _, _, _ -> throw AssertionError("QUICK darf keinen Vulkan-Preflight ausführen.") },
+            runWorkflow = { _, _, _, _ ->
+                val active = activeWorkflows.incrementAndGet()
+                recordPeak(peakWorkflows, active)
+                delay(10)
+                activeWorkflows.decrementAndGet()
+                AutomatedWorkflowResult(actualRuns = 1, succeeded = true)
+            }
+        )
+
+        assertEquals(2, peakDownloads.get())
+        assertEquals(1, peakWorkflows.get())
     }
 
     @Test
