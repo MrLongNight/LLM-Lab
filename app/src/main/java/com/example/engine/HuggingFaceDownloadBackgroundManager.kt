@@ -88,7 +88,14 @@ object HuggingFaceDownloadBackgroundManager {
         }
 
         return suspendCancellableCoroutine { continuation ->
-            val receiver = object : BroadcastReceiver() {
+            val receiverRegistered = java.util.concurrent.atomic.AtomicBoolean(false)
+            lateinit var receiver: BroadcastReceiver
+            fun unregisterReceiver() {
+                if (receiverRegistered.compareAndSet(true, false)) {
+                    runCatching { app.unregisterReceiver(receiver) }
+                }
+            }
+            receiver = object : BroadcastReceiver() {
                 override fun onReceive(context: Context?, intent: Intent?) {
                     if (intent?.getStringExtra(EXTRA_MODEL_ID) != model.id || !continuation.isActive) return
                     when (intent.action) {
@@ -99,17 +106,22 @@ object HuggingFaceDownloadBackgroundManager {
                                     intent.getLongExtra(EXTRA_TOTAL, model.estimatedSizeBytes)
                                 )
                             } catch (error: Throwable) {
+                                unregisterReceiver()
                                 continuation.cancel(error)
                             }
                         }
                         ACTION_COMPLETED -> {
+                            unregisterReceiver()
                             val file = File(app.filesDir, "models/${model.filename}")
                             if (file.isFile && file.length() > 0L) continuation.resume(file)
                             else continuation.resumeWithException(IOException("Download für ${model.filename} wurde ohne fertige Datei gemeldet."))
                         }
-                        ACTION_FAILED -> continuation.resumeWithException(
-                            IOException(intent.getStringExtra(EXTRA_ERROR) ?: "Download für ${model.filename} fehlgeschlagen.")
-                        )
+                        ACTION_FAILED -> {
+                            unregisterReceiver()
+                            continuation.resumeWithException(
+                                IOException(intent.getStringExtra(EXTRA_ERROR) ?: "Download für ${model.filename} fehlgeschlagen.")
+                            )
+                        }
                     }
                 }
             }
@@ -124,8 +136,9 @@ object HuggingFaceDownloadBackgroundManager {
                 },
                 ContextCompat.RECEIVER_NOT_EXPORTED
             )
+            receiverRegistered.set(true)
             continuation.invokeOnCancellation {
-                runCatching { app.unregisterReceiver(receiver) }
+                unregisterReceiver()
                 cancel(app, model.id)
             }
 
@@ -280,6 +293,7 @@ class HuggingFaceModelDownloadJobService : JobService() {
             try {
                 downloadSlots.withPermit {
                     HuggingFaceModelDownloader(applicationContext).download(model) { downloaded, total ->
+                        updateTransferredNetworkBytes(params, downloaded.coerceAtLeast(0L), 0L)
                         setNotification(
                             params,
                             notificationId,
@@ -295,7 +309,7 @@ class HuggingFaceModelDownloadJobService : JobService() {
                     params,
                     notificationId,
                     DownloadNotification.build(this@HuggingFaceModelDownloadJobService, model, model.estimatedSizeBytes, model.estimatedSizeBytes, "Download abgeschlossen"),
-                    JOB_END_NOTIFICATION_POLICY_DETACH
+                    JOB_END_NOTIFICATION_POLICY_REMOVE
                 )
                 jobFinished(params, false)
             } catch (cancelled: CancellationException) {
