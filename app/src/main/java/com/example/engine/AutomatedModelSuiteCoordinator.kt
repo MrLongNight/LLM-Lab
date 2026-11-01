@@ -48,7 +48,8 @@ data class AutomatedWorkflowResult(
  */
 class AutomatedModelSuiteCoordinator(
     private val context: Context? = null,
-    private val memoryInfoProvider: (() -> Long)? = null
+    private val memoryInfoProvider: (() -> Long)? = null,
+    private val memoryLogger: (String) -> Unit = { Log.e(TAG, it) }
 ) {
 
     private val modelLoadSemaphore = Semaphore(1)
@@ -81,7 +82,7 @@ class AutomatedModelSuiteCoordinator(
 
         val memoryMonitor = context?.let { appContext ->
             MemoryPressureMonitor(appContext) {
-                Log.w(TAG, "Critical memory pressure reported by Android; cancelling active model suite.")
+                memoryLogger("Critical memory pressure reported by Android; cancelling active model suite.")
                 cancelCurrent()
             }
         }
@@ -98,10 +99,10 @@ class AutomatedModelSuiteCoordinator(
                             val requiredBytes = model.estimatedSizeBytes + model.estimatedSizeBytes / 2L
                             if (availableBytes < requiredBytes) {
                                 val message = "Insufficient memory for model ${model.filename} (need ${requiredBytes} bytes, have ${availableBytes} bytes)"
-                                Log.e(TAG, message)
+                                memoryLogger(message)
                                 throw InsufficientModelMemoryException(message)
                             }
-                            Log.d(TAG, "Memory check passed for ${model.filename}: need ${requiredBytes} bytes, have ${availableBytes} bytes.")
+                            memoryLogger("Memory check passed for ${model.filename}: need ${requiredBytes} bytes, have ${availableBytes} bytes.")
                         }
                         loadModel(file, loadConfig, timeout)
                     }

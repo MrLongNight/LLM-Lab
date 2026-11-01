@@ -279,8 +279,10 @@ class AutomatedModelSuiteTest {
     fun suiteStopsBeforeNativeLoadWhenFreeMemoryIsBelowOneAndAHalfModelSizes() = kotlinx.coroutines.test.runTest {
         val model = HuggingFaceModelCatalog.models.first()
         val requiredBytes = model.estimatedSizeBytes + model.estimatedSizeBytes / 2L
+        val logMessages = mutableListOf<String>()
         val coordinator = AutomatedModelSuiteCoordinator(
-            memoryInfoProvider = { requiredBytes - 1L }
+            memoryInfoProvider = { requiredBytes - 1L },
+            memoryLogger = { message -> logMessages += message }
         )
         var loadCalls = 0
         var finalProgress = AutomatedModelSuiteProgress()
@@ -308,6 +310,7 @@ class AutomatedModelSuiteTest {
         assertTrue(output.contains("Insufficient memory for model ${model.filename}"))
         assertTrue(output.contains("need ${requiredBytes} bytes"))
         assertTrue(output.contains("have ${requiredBytes - 1L} bytes"))
+        assertTrue(logMessages.any { it.contains("Insufficient memory for model ${model.filename}") })
         assertTrue(finalProgress.error.orEmpty().contains("Insufficient memory"))
         assertEquals("ERROR", finalProgress.phase)
     }
