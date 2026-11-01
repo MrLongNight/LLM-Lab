@@ -95,12 +95,11 @@ class AutomatedModelSuiteTest {
         val fullRuns = mutableListOf<String>()
         var finalProgress = AutomatedModelSuiteProgress()
 
-        coordinator.execute(
+        coordinator.run(SuiteRequest(SuiteMode.FULL),
             models = models,
             modelDirectory = java.io.File("unused-model-directory"),
             config = InferenceConfig.fromPreset(ProfilePreset.BALANCED),
             fullRoutine = listOf(PromptTestCase("TEST_DMS", "DMS", "", "Prompt", emptyList())),
-            runFullAfterQuickCheck = true,
             isAborted = { false },
             onProgress = { finalProgress = it },
             onOutput = {},
